@@ -1,0 +1,25 @@
+{"query":"How does findCutPoint handle a single user message span that exceeds keepRecentTokens?","scope":"pi","expected":["74ede88715e85ef1dde2c82afb1e0dcb","4d250285ea4f728b5cb6d6296a3348c5","4239773e0aa3650f63dc64e96b62991b"]}
+{"query":"What happens in prepareCompaction when the cut lands in the middle of a turn?","scope":"pi","expected":["4d250285ea4f728b5cb6d6296a3348c5","4239773e0aa3650f63dc64e96b62991b"]}
+{"query":"How are the history summary and turn prefix summary merged by compact?","scope":"pi","expected":["4239773e0aa3650f63dc64e96b62991b","4d250285ea4f728b5cb6d6296a3348c5"]}
+{"query":"How does buildContextEntries combine the newest compaction and firstKeptEntryId?","scope":"pi","expected":["ea3c4f95e12929800a09e214bef35d95","144f1301d61727ccf037198859fa11fe"]}
+{"query":"How do context edits behave for null replacement latest edit wins branch relative and raw history?","scope":"pi","expected":["819f2f47a626ffd999054fd2137d915b","144f1301d61727ccf037198859fa11fe"]}
+{"query":"How does buildSessionProjection apply string replacement and prevent older compaction summaries from appearing twice?","scope":"pi","expected":["144f1301d61727ccf037198859fa11fe","ea3c4f95e12929800a09e214bef35d95"]}
+{"query":"Which files and marker define the durable JSONL commit point?","scope":"pi","expected":["430a0eaaf993452824e2982321673ddf"]}
+{"query":"How does durable JSONL crash recovery handle torn lines and unconfirmed sidecar tails?","scope":"pi","expected":["af243cff575782548ef2952a08c7df2d"]}
+{"query":"How are seq and ordinal validated in durable JSONL markers and sidecars?","scope":"pi","expected":["a466547df6e7287d7a79be119621d6cf"]}
+{"query":"How are system prompt sections persisted as deltas and replayed with tools?","scope":"pi","expected":["9b5537e29e807361aa9ee4cf2a0edad3","e70c92589dd67d0cba0b54ada472d5b9","07470b0a8b09846faf2e302b54cc8f55"]}
+{"query":"What is the replay order for toolsAdded and toolsRemoved in SystemMessages?","scope":"pi","expected":["e70c92589dd67d0cba0b54ada472d5b9"]}
+{"query":"Why is there no separate prompt state and what does CompactionEntry.systemMessage store?","scope":"pi","expected":["07470b0a8b09846faf2e302b54cc8f55"]}
+{"query":"How do calculateContextTokens and estimateContextTokens use provider usage?","scope":"pi","expected":["56ad933f81b98cba01a5fd45ab13b158"]}
+{"query":"When is projected usage invalidated after a context edit or compaction?","scope":"pi","expected":["30aa6182ec4171e2113d45f72b9c5d5e"]}
+{"query":"How is tokensBefore calculated and recomputed for compaction?","scope":"pi","expected":["4a82e953c9366cca792e03c0555a99f6"]}
+{"query":"What do DocumentRecord history latest rewindable and fork current asOf initial mean?","scope":"pi","expected":["e82ef888aa1b20f0464f1f8f1bda94fb"]}
+{"query":"How does checkpointWhen turn a document delta into a base?","scope":"pi","expected":["f9457287888269869cdf19e564638864"]}
+{"query":"Where are durable documents and revisions stored in SQLite and JSONL sidecars?","scope":"pi","expected":["4cf8caaa4ec219bef565959a3500d24b"]}
+{"query":"压缩切点如何处理单个用户消息超过 keepRecentTokens 的情况？","scope":"pi","expected":["74ede88715e85ef1dde2c82afb1e0dcb","4d250285ea4f728b5cb6d6296a3348c5"]}
+{"query":"context edit 的 null 替换、字符串替换、latest edit wins 和分支隔离分别是什么？","scope":"pi","expected":["819f2f47a626ffd999054fd2137d915b","144f1301d61727ccf037198859fa11fe"]}
+{"query":"How does crash recovery truncate a torn final line and discard unconfirmed tails?","scope":"pi","expected":["af243cff575782548ef2952a08c7df2d"]}
+{"query":"How are prompt section patches and tool declarations replayed into current prompt state?","scope":"pi","expected":["9b5537e29e807361aa9ee4cf2a0edad3","e70c92589dd67d0cba0b54ada472d5b9"]}
+{"query":"How do I configure Atlas Kubernetes readiness and liveness probes?","scope":"pi","expected":[]}
+{"query":"What is the recommended Kafka retention setting for Atlas?","scope":"pi","expected":[]}
+{"query":"How do I rotate the Atlas KMS key atlas-pii?","scope":"pi","expected":[]}

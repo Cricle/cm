@@ -43,3 +43,7 @@ jobs:
 
       - name: Build release
         run: cargo build --release --locked
+
+      - name: Accuracy eval
+        if: runner.os == 'Linux'
+        run: python3 eval/run_eval.py --cm target/release/cm

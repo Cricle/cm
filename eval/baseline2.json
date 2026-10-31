@@ -1,0 +1,393 @@
+{
+  "metrics": {
+    "store_verify": {
+      "active_index_docs": 18,
+      "active_total": 18,
+      "blocks": 1,
+      "bytes": 31840,
+      "index_bytes": 18727,
+      "index_docs": 18,
+      "index_raw_bytes": 55576,
+      "ok": true,
+      "tail_memories": 0,
+      "version": 1
+    },
+    "queries": 25,
+    "positive_queries": 22,
+    "negative_queries": 3,
+    "recall_at_k": 0.5454545454545454,
+    "precision_at_k": 0.5393939393939394,
+    "mrr": 0.6136363636363636,
+    "hit_at_1": 0.5909090909090909,
+    "no_answer_accuracy": 0.0,
+    "top": 5
+  },
+  "details": [
+    {
+      "query": "How does findCutPoint handle a single user message span that exceeds keepRecentTokens?",
+      "expected": [
+        "74ede88715e85ef1dde2c82afb1e0dcb",
+        "4d250285ea4f728b5cb6d6296a3348c5",
+        "4239773e0aa3650f63dc64e96b62991b"
+      ],
+      "got": [
+        "74ede88715e85ef1dde2c82afb1e0dcb"
+      ],
+      "recall": 0.3333333333333333,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "What happens in prepareCompaction when the cut lands in the middle of a turn?",
+      "expected": [
+        "4d250285ea4f728b5cb6d6296a3348c5",
+        "4239773e0aa3650f63dc64e96b62991b"
+      ],
+      "got": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How are the history summary and turn prefix summary merged by compact?",
+      "expected": [
+        "4239773e0aa3650f63dc64e96b62991b",
+        "4d250285ea4f728b5cb6d6296a3348c5"
+      ],
+      "got": [
+        "4239773e0aa3650f63dc64e96b62991b"
+      ],
+      "recall": 0.5,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How does buildContextEntries combine the newest compaction and firstKeptEntryId?",
+      "expected": [
+        "ea3c4f95e12929800a09e214bef35d95",
+        "144f1301d61727ccf037198859fa11fe"
+      ],
+      "got": [
+        "4239773e0aa3650f63dc64e96b62991b"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How do context edits behave for null replacement latest edit wins branch relative and raw history?",
+      "expected": [
+        "819f2f47a626ffd999054fd2137d915b",
+        "144f1301d61727ccf037198859fa11fe"
+      ],
+      "got": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How does buildSessionProjection apply string replacement and prevent older compaction summaries from appearing twice?",
+      "expected": [
+        "144f1301d61727ccf037198859fa11fe",
+        "ea3c4f95e12929800a09e214bef35d95"
+      ],
+      "got": [
+        "a466547df6e7287d7a79be119621d6cf"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "Which files and marker define the durable JSONL commit point?",
+      "expected": [
+        "430a0eaaf993452824e2982321673ddf"
+      ],
+      "got": [
+        "819f2f47a626ffd999054fd2137d915b"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How does durable JSONL crash recovery handle torn lines and unconfirmed sidecar tails?",
+      "expected": [
+        "af243cff575782548ef2952a08c7df2d"
+      ],
+      "got": [
+        "af243cff575782548ef2952a08c7df2d"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How are seq and ordinal validated in durable JSONL markers and sidecars?",
+      "expected": [
+        "a466547df6e7287d7a79be119621d6cf"
+      ],
+      "got": [
+        "af243cff575782548ef2952a08c7df2d",
+        "a466547df6e7287d7a79be119621d6cf"
+      ],
+      "recall": 1.0,
+      "precision": 0.5,
+      "mrr": 0.5,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How are system prompt sections persisted as deltas and replayed with tools?",
+      "expected": [
+        "9b5537e29e807361aa9ee4cf2a0edad3",
+        "e70c92589dd67d0cba0b54ada472d5b9",
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "got": [
+        "e70c92589dd67d0cba0b54ada472d5b9",
+        "9b5537e29e807361aa9ee4cf2a0edad3"
+      ],
+      "recall": 0.6666666666666666,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "What is the replay order for toolsAdded and toolsRemoved in SystemMessages?",
+      "expected": [
+        "e70c92589dd67d0cba0b54ada472d5b9"
+      ],
+      "got": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "Why is there no separate prompt state and what does CompactionEntry.systemMessage store?",
+      "expected": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "got": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How do calculateContextTokens and estimateContextTokens use provider usage?",
+      "expected": [
+        "56ad933f81b98cba01a5fd45ab13b158"
+      ],
+      "got": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "When is projected usage invalidated after a context edit or compaction?",
+      "expected": [
+        "30aa6182ec4171e2113d45f72b9c5d5e"
+      ],
+      "got": [
+        "30aa6182ec4171e2113d45f72b9c5d5e"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How is tokensBefore calculated and recomputed for compaction?",
+      "expected": [
+        "4a82e953c9366cca792e03c0555a99f6"
+      ],
+      "got": [
+        "4a82e953c9366cca792e03c0555a99f6",
+        "30aa6182ec4171e2113d45f72b9c5d5e",
+        "4d250285ea4f728b5cb6d6296a3348c5",
+        "74ede88715e85ef1dde2c82afb1e0dcb",
+        "56ad933f81b98cba01a5fd45ab13b158"
+      ],
+      "recall": 1.0,
+      "precision": 0.2,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "What do DocumentRecord history latest rewindable and fork current asOf initial mean?",
+      "expected": [
+        "e82ef888aa1b20f0464f1f8f1bda94fb"
+      ],
+      "got": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "no_answer": null
+    },
+    {
+      "query": "How does checkpointWhen turn a document delta into a base?",
+      "expected": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "got": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "Where are durable documents and revisions stored in SQLite and JSONL sidecars?",
+      "expected": [
+        "4cf8caaa4ec219bef565959a3500d24b"
+      ],
+      "got": [
+        "4cf8caaa4ec219bef565959a3500d24b"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "压缩切点如何处理单个用户消息超过 keepRecentTokens 的情况？",
+      "expected": [
+        "74ede88715e85ef1dde2c82afb1e0dcb",
+        "4d250285ea4f728b5cb6d6296a3348c5"
+      ],
+      "got": [
+        "74ede88715e85ef1dde2c82afb1e0dcb",
+        "4a82e953c9366cca792e03c0555a99f6",
+        "4d250285ea4f728b5cb6d6296a3348c5"
+      ],
+      "recall": 1.0,
+      "precision": 0.6666666666666666,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "context edit 的 null 替换、字符串替换、latest edit wins 和分支隔离分别是什么？",
+      "expected": [
+        "819f2f47a626ffd999054fd2137d915b",
+        "144f1301d61727ccf037198859fa11fe"
+      ],
+      "got": [
+        "819f2f47a626ffd999054fd2137d915b",
+        "144f1301d61727ccf037198859fa11fe"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How does crash recovery truncate a torn final line and discard unconfirmed tails?",
+      "expected": [
+        "af243cff575782548ef2952a08c7df2d"
+      ],
+      "got": [
+        "af243cff575782548ef2952a08c7df2d"
+      ],
+      "recall": 1.0,
+      "precision": 1.0,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How are prompt section patches and tool declarations replayed into current prompt state?",
+      "expected": [
+        "9b5537e29e807361aa9ee4cf2a0edad3",
+        "e70c92589dd67d0cba0b54ada472d5b9"
+      ],
+      "got": [
+        "e70c92589dd67d0cba0b54ada472d5b9",
+        "30aa6182ec4171e2113d45f72b9c5d5e"
+      ],
+      "recall": 0.5,
+      "precision": 0.5,
+      "mrr": 1.0,
+      "hit_at_1": 1.0,
+      "no_answer": null
+    },
+    {
+      "query": "How do I configure Atlas Kubernetes readiness and liveness probes?",
+      "expected": [],
+      "got": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "recall": null,
+      "precision": null,
+      "mrr": null,
+      "hit_at_1": null,
+      "no_answer": false
+    },
+    {
+      "query": "What is the recommended Kafka retention setting for Atlas?",
+      "expected": [],
+      "got": [
+        "07470b0a8b09846faf2e302b54cc8f55"
+      ],
+      "recall": null,
+      "precision": null,
+      "mrr": null,
+      "hit_at_1": null,
+      "no_answer": false
+    },
+    {
+      "query": "How do I rotate the Atlas KMS key atlas-pii?",
+      "expected": [],
+      "got": [
+        "f9457287888269869cdf19e564638864"
+      ],
+      "recall": null,
+      "precision": null,
+      "mrr": null,
+      "hit_at_1": null,
+      "no_answer": false
+    }
+  ]
+}

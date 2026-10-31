@@ -263,6 +263,67 @@ impl Store {
         }
     }
 
+    fn bm25_all_terms(
+        &self,
+        terms: &[String],
+        scope_id: Option<u32>,
+        kind: Option<u8>,
+        exclude: Option<u32>,
+        limit: usize,
+    ) -> Result<Vec<(u32, f64)>> {
+        let ib = self.index();
+        let doc_count = read_u32(ib, 8) as f64;
+        let avgdl = read_f64(ib, 96);
+        let mut scores = vec![0.0f64; doc_count as usize];
+        let mut touched = Vec::new();
+        let postings_off = read_u64(ib, 80) as usize;
+        let docs_off = read_u64(ib, 24) as usize;
+        let active_off = read_u64(ib, 48) as usize;
+        for term in terms {
+            let Some((start, count)) = self.token_lookup(term) else {
+                continue;
+            };
+            let df = count as f64;
+            let idf = (1.0 + (doc_count - df + 0.5) / (df + 0.5)).ln();
+            for p in 0..count as usize {
+                let offset = postings_off + (start as usize + p) * 8;
+                let doc_idx = read_u32(ib, offset);
+                if exclude == Some(doc_idx)
+                    || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
+                {
+                    continue;
+                }
+                let meta_offset = docs_off + doc_idx as usize * DOC_SIZE;
+                let scope = read_u32(ib, meta_offset + 16);
+                let kind_value = ib[meta_offset + 28];
+                if scope_id.is_some_and(|value| scope != value)
+                    || kind.is_some_and(|value| kind_value != value)
+                {
+                    continue;
+                }
+                let token_count = read_u32(ib, docs_off + doc_idx as usize * DOC_SIZE + 12) as f64;
+                let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
+                let tf = read_u32(ib, offset + 4) as f64;
+                let score = idf * (tf * 2.2) / (tf + norm);
+                let idx = doc_idx as usize;
+                if scores[idx] == 0.0 {
+                    touched.push(doc_idx);
+                }
+                scores[idx] += score;
+            }
+        }
+        touched.sort_by(|a, b| {
+            scores[*b as usize]
+                .partial_cmp(&scores[*a as usize])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        touched.truncate(limit);
+        Ok(touched
+            .into_iter()
+            .map(|doc| (doc, scores[doc as usize]))
+            .collect())
+    }
+
     pub(crate) fn bm25(
         &self,
         query: &str,
@@ -283,7 +344,12 @@ impl Store {
         let mut term_info = Vec::new();
         for term in &terms {
             if let Some((start, count)) = self.token_lookup(term) {
-                if count as f64 <= doc_count / 10.0 {
+                let high_df_cutoff = if doc_count >= 10_000.0 {
+                    doc_count / 10.0
+                } else {
+                    f64::INFINITY
+                };
+                if count as f64 <= high_df_cutoff {
                     let idf = (1.0 + (doc_count - count as f64 + 0.5) / (count as f64 + 0.5)).ln();
                     term_info.push((start, count, idf));
                 }
@@ -299,6 +365,9 @@ impl Store {
         }
         if term_info.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.doc_count() <= 10_000 {
+            return self.bm25_all_terms(&terms, scope_id, kind, exclude, limit);
         }
         term_info.sort_by_key(|(_, count, _)| *count);
         let (anchor_start, anchor_count, _) = term_info[0];
