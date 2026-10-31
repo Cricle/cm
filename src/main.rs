@@ -274,6 +274,7 @@ fn run() -> Result<()> {
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
+        "checkpoint" => cmd_checkpoint(&arg_path(&args)),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
             if !ok && has_flag(&args, "--strict") {
@@ -496,6 +497,7 @@ fn cmd_export(path: &Path, format: String) -> Result<()> {
 
 fn cmd_import(path: &Path) -> Result<()> {
     read_header_file(path)?;
+    let store_lock = crate::store::acquire_store_lock(path)?;
     let file = OpenOptions::new().read(true).append(true).open(path)?;
     file.lock_exclusive()?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
@@ -534,6 +536,7 @@ fn cmd_import(path: &Path) -> Result<()> {
         .map_err(|error| anyhow!("flush import: {error}"))?;
     let _ = lock_file.unlock();
     drop(lock_file);
+    drop(store_lock);
     reindex_file(path)?;
     outln!(
         "{}",
@@ -599,6 +602,21 @@ fn cmd_skill(json_output: bool, install: bool, check: bool, dir: Option<String>)
         let _ = stdout.write_all(SKILL_TEXT.as_bytes());
         let _ = stdout.flush();
     }
+    Ok(())
+}
+
+fn cmd_checkpoint(path: &Path) -> Result<()> {
+    let header = crate::store::checkpoint_file(path)?;
+    outln!(
+        "{}",
+        json!({
+            "ok": true,
+            "doc_count": header.doc_count,
+            "blocks": header.block_count,
+            "index_bytes": header.index_len,
+            "tail_start": header.tail_start
+        })
+    );
     Ok(())
 }
 
@@ -1516,6 +1534,78 @@ mod tests {
             .is_empty());
         assert!(cmd_get(&path, &id).is_err());
         assert!(cmd_forget(&path, &id).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_input(subject: &str, text: &str) -> AppendInput {
+        AppendInput {
+            kind: "fact".to_string(),
+            scope: "test".to_string(),
+            subject: subject.to_string(),
+            text: text.to_string(),
+            source: "audit".to_string(),
+            confidence: 0.9,
+            valid_from: 0,
+            valid_to: None,
+            supersedes: Vec::new(),
+            conflict_of: None,
+            trust: Some("verified".to_string()),
+            source_commit: None,
+        }
+    }
+
+    fn test_active_total(path: &Path) -> u64 {
+        let mut store = Store::open(path).expect("open");
+        let tail = store.tail_view().expect("tail");
+        let mut active = store.active_count();
+        for id in &tail.hidden {
+            if let Some((idx, _)) = store.find_doc(id).expect("find hidden") {
+                if store.is_active(idx).expect("active") {
+                    active = active.saturating_sub(1);
+                }
+            }
+        }
+        active + tail.memories.len() as u64
+    }
+
+    #[test]
+    fn checkpoint_masks_tombstoned_index_without_reindex() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        cmd_append_input(&path, &test_input("first subject", "first body"), true).expect("first");
+        cmd_append_input(&path, &test_input("second subject", "second body"), true)
+            .expect("second");
+        cmd_reindex(&path).expect("reindex");
+        let first_id = {
+            let mut store = Store::open(&path).expect("open");
+            store.scan_page(1, 0).expect("scan")[0].id.clone()
+        };
+        cmd_forget(&path, &first_id).expect("forget");
+        cmd_append_input(&path, &test_input("tail subject", "tail body"), true).expect("tail");
+        let before = {
+            let mut store = Store::open(&path).expect("open");
+            store
+                .scan_page(usize::MAX, 0)
+                .expect("before")
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<Vec<_>>()
+        };
+        cmd_checkpoint(&path).expect("checkpoint");
+        let after = {
+            let mut store = Store::open(&path).expect("open after checkpoint");
+            store
+                .scan_page(usize::MAX, 0)
+                .expect("after")
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(before, after);
+        assert_eq!(test_active_total(&path), 2);
+        cmd_verify(&path, true).expect("verify");
+        assert!(cmd_doctor(&path).expect("doctor"));
         fs::remove_dir_all(&dir).ok();
     }
 

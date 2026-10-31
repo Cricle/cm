@@ -6,7 +6,8 @@
 `cm` is a single-file, compressed, mmap-backed memory store for AI agents.
 It is not Markdown and not a database server: one file holds an append-only
 data log, a compressed BM25/MinHash index, and an optional disposable `cm.lru`
-cache.
+cache. Writers coordinate through a disposable `cm.lock`; it contains no memory
+data.
 
 ## Install
 
@@ -45,6 +46,7 @@ cm init [--file cm] [--empty]
 cm append --file cm --json '<json>' [--durable]
 cm import --file cm < records.jsonl
 cm export --file cm [--format cmx|jsonl]
+cm checkpoint [--file cm]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
@@ -72,6 +74,21 @@ cm import --file restored < backup.jsonl
 `jsonl` export preserves ids, timestamps, sources, and merged records.
 Import a full export into an empty store. Append-only JSONL import also accepts
 `{kind,scope,subject,text,source,confidence}` records.
+
+## COW checkpoint
+
+```bash
+cm checkpoint --file cm
+```
+
+`checkpoint` is the copy-on-write path: it copies existing compressed data
+blocks unchanged, applies tail tombstones/merges/supersedes to the index active
+bitset, and atomically replaces `cm`. It does **not** compact dead blocks or
+reclaim their space; use `cm reindex` for that. `checkpoint` is for fast,
+crash-safe index-state commits; `reindex` is for full compaction.
+
+On a 1,000,030-record store, the block-reuse checkpoint is roughly 1.1s instead
+of minutes for a full reindex. A 10,000-record checkpoint is roughly 22ms.
 
 ## Agent skill
 
@@ -101,9 +118,10 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 
 ## Design
 
-- Single memory file `cm`; optional disposable `cm.lru` cache.
+- Single memory file `cm`; optional disposable `cm.lru` cache and `cm.lock` writer lock.
 - Append-only data log with 64 KiB compressed blocks.
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
+- `cm checkpoint` reuses immutable compressed blocks and commits a new index state by atomic rename.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded LFU/LRU block cache.
@@ -120,7 +138,10 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 | `append` | ~8 ms |
 | `search --top 8` | ~12 ms |
 
-Numbers are workload-dependent; use `cm verify` after bulk changes.
+`checkpoint` (cold process, 1M records) measured p50 ~1.12s / p95 ~1.13s; 10k
+records measured p50 ~22ms / p95 ~25ms. A full `reindex` of the same 1M store
+is roughly 3m19s. Numbers are workload-dependent; use `cm verify` after bulk
+changes.
 
 ## Development
 

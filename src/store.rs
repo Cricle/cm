@@ -624,6 +624,10 @@ pub(crate) fn append_record(
     payload: &[u8],
     durable: bool,
 ) -> Result<()> {
+    // The lock file, not the store inode, is the stable mutex: checkpoint and
+    // reindex replace the store by rename, so a lock held on the old cm file
+    // would not exclude writers that open the new path.
+    let _store_lock = acquire_store_lock(path)?;
     let mut file = OpenOptions::new().read(true).append(true).open(path)?;
     file.lock_exclusive()?;
     file.write_all(&encode_record(rec_type, 0, payload)?)?;
@@ -793,6 +797,7 @@ pub(crate) fn verify_full(path: &Path) -> Result<u64> {
 }
 
 pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
+    let _store_lock = acquire_store_lock(path)?;
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
     let old_header = decode_header(&mmap)?;
@@ -855,6 +860,131 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     Ok(header)
 }
 
+/// Copy-on-write checkpoint: keep data blocks and the index structure
+/// byte-for-byte, applying tail tombstones/merges as an active-bit mask.
+/// Old compressed blocks are copied into a new file; only the index bitset is
+/// modified and recompressed. Full dead-record/index compaction stays in
+/// `reindex`.
+pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
+    // The lock file is stable across the rename below, so appends and reindex
+    // cannot write into the old inode while its bytes are being copied.
+    let _store_lock = acquire_store_lock(path)?;
+    let mut store = Store::open(path)?;
+    let old_header = store.header;
+    let tail_start = old_header.tail_start as usize;
+    if tail_start > store.mmap.len() {
+        bail!("tail out of bounds");
+    }
+    // A checkpoint must not bless a damaged tail: reject truncated/garbage
+    // records before creating cm.tmp, while the original file is untouched.
+    read_records_from_checked(&store.mmap, tail_start).context("validate tail")?;
+    let tail = store.tail_view()?;
+    let doc_count = store.doc_count();
+    let mut index_raw = store.index().to_vec();
+    let active_off = read_u64(&index_raw, 48) as usize;
+    let scopes_off = read_u64(&index_raw, 56) as usize;
+    let active_len = (doc_count as usize).div_ceil(8);
+    if active_off < INDEX_HEADER
+        || scopes_off > index_raw.len()
+        || active_off
+            .checked_add(active_len)
+            .is_none_or(|end| end > scopes_off)
+    {
+        bail!("index active bitset out of bounds");
+    }
+    for id in &tail.hidden {
+        if let Some((idx, _)) = store.find_doc(id)? {
+            index_raw[active_off + idx as usize / 8] &= !(1u8 << (idx % 8));
+        }
+    }
+    let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
+    let index_hash = xxh3_64(&index_raw);
+
+    struct OldBlock {
+        offset: usize,
+        comp_len: usize,
+    }
+    let table_off = old_header.block_table_off as usize;
+    let block_count = old_header.block_count as usize;
+    let table_end = table_off
+        .checked_add(
+            block_count
+                .checked_mul(BLOCK_ENTRY)
+                .context("block table size overflow")?,
+        )
+        .context("block table offset overflow")?;
+    if table_end > store.mmap.len() {
+        bail!("block table out of bounds");
+    }
+    let mut old_blocks = Vec::with_capacity(block_count);
+    for block_id in 0..block_count {
+        let entry = table_off
+            .checked_add(block_id * BLOCK_ENTRY)
+            .context("block table offset overflow")?;
+        let offset = read_u64(&store.mmap, entry) as usize;
+        let comp_len = read_u32(&store.mmap, entry + 8) as usize;
+        let end = offset
+            .checked_add(16)
+            .and_then(|value| value.checked_add(comp_len))
+            .context("block bounds overflow")?;
+        if end > store.mmap.len() {
+            bail!("block {block_id} out of bounds");
+        }
+        old_blocks.push(OldBlock { offset, comp_len });
+    }
+
+    let block_table_off = HEADER_LEN;
+    let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
+    let data_start = index_off + index_comp.len();
+    let mut block_offsets = Vec::with_capacity(block_count);
+    let mut cursor = data_start;
+    for block in &old_blocks {
+        block_offsets.push(cursor);
+        cursor += 16 + block.comp_len;
+    }
+    let header = Header {
+        created_at: old_header.created_at,
+        block_table_off: block_table_off as u64,
+        block_count: block_count as u64,
+        index_off: index_off as u64,
+        index_len: index_comp.len() as u64,
+        index_raw_len: index_raw.len() as u64,
+        index_hash,
+        data_start: data_start as u64,
+        tail_start: cursor as u64,
+        doc_count: doc_count as u64,
+    };
+
+    let tmp = temp_path(path);
+    if tmp.exists() {
+        fs::remove_file(&tmp).ok();
+    }
+    let mut out = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    out.write_all(&encode_header(&header))?;
+    for (block, offset) in old_blocks.iter().zip(block_offsets.iter()) {
+        let mut entry = [0u8; BLOCK_ENTRY];
+        write_u64(&mut entry, 0, *offset as u64);
+        write_u32(&mut entry, 8, block.comp_len as u32);
+        write_u32(&mut entry, 12, read_u32(&store.mmap, block.offset + 4));
+        write_u64(&mut entry, 16, read_u64(&store.mmap, block.offset + 8));
+        out.write_all(&entry)?;
+    }
+    out.write_all(&index_comp)?;
+    for block in &old_blocks {
+        out.write_all(&store.mmap[block.offset..block.offset + 16 + block.comp_len])?;
+    }
+    out.write_all(&store.mmap[tail_start..])?;
+    out.sync_all()?;
+    drop(out);
+    drop(store);
+    fs::rename(&tmp, path)?;
+    let cache_path = path.with_file_name("cm.lru");
+    if cache_path.exists() {
+        fs::remove_file(&cache_path).ok();
+    }
+    Ok(header)
+}
+
 fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)> {
     let mut blocks = Vec::new();
     let mut current = Vec::new();
@@ -885,6 +1015,12 @@ fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)>
         blocks.push(seal_block(&current)?);
     }
 
+    let n = docs.len();
+    let index = build_index_bytes(docs)?;
+    Ok((index, blocks, n as u32))
+}
+
+fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
     let mut scopes: Vec<String> = Vec::new();
     let mut scope_map: HashMap<String, u32> = HashMap::new();
     let mut token_entries: Vec<TokenEntry> = Vec::new();
@@ -1013,7 +1149,8 @@ fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)>
     }
     index[hash_off..hash_off + hash_table.len()].copy_from_slice(&hash_table);
     for i in 0..n {
-        index[active_off + i / 8] = if i / 8 == active_len.saturating_sub(1) && n % 8 != 0 {
+        index[active_off + i / 8] = if i / 8 == active_len.saturating_sub(1) && !n.is_multiple_of(8)
+        {
             (1u8 << (n % 8)) - 1
         } else {
             0xFF
@@ -1028,7 +1165,7 @@ fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)>
         write_u32(&mut index, postings_off + i * 8, *doc);
         write_u32(&mut index, postings_off + i * 8 + 4, *tf);
     }
-    Ok((index, blocks, n as u32))
+    Ok(index)
 }
 
 struct IndexDoc {
@@ -1063,6 +1200,28 @@ fn temp_path(path: &Path) -> PathBuf {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "cm".to_string());
     path.with_file_name(format!("{name}.tmp"))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cm".to_string());
+    path.with_file_name(format!("{name}.lock"))
+}
+
+/// Cross-process mutex for writers that can replace `path` by rename.
+/// Readers stay lock-free: rename is atomic, so they observe either version.
+pub(crate) fn acquire_store_lock(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path(path))
+        .with_context(|| format!("open lock {}", lock_path(path).display()))?;
+    file.lock_exclusive()?;
+    Ok(file)
 }
 
 pub(crate) fn encode_header(header: &Header) -> [u8; HEADER_LEN] {
@@ -1132,6 +1291,38 @@ fn align8(value: usize) -> usize {
 mod tests {
     use super::*;
     use crate::model::{memory_payload, new_memory};
+    use std::time::Duration;
+
+    fn temp_store_path() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cm-store-test-{}", crate::model::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("cm")
+    }
+
+    fn empty_indexed_store() -> PathBuf {
+        let path = temp_store_path();
+        let header = Header {
+            created_at: 0,
+            block_table_off: HEADER_LEN as u64,
+            block_count: 0,
+            index_off: HEADER_LEN as u64,
+            index_len: 0,
+            index_raw_len: 0,
+            index_hash: 0,
+            data_start: HEADER_LEN as u64,
+            tail_start: HEADER_LEN as u64,
+            doc_count: 0,
+        };
+        fs::write(&path, encode_header(&header)).expect("write header");
+        reindex_file(&path).expect("reindex empty store");
+        path
+    }
+
+    fn cleanup(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::remove_dir_all(parent).ok();
+        }
+    }
 
     fn sample_record() -> Vec<u8> {
         let memory = new_memory(
@@ -1163,5 +1354,77 @@ mod tests {
         let mut padded = record;
         padded.extend_from_slice(b"junk");
         assert!(read_records_from_checked(&padded, 0).is_err());
+    }
+
+    #[test]
+    fn checkpoint_waits_for_writer_lock() {
+        let path = empty_indexed_store();
+        let lock = acquire_store_lock(&path).expect("hold store lock");
+        let checkpoint_path = path.clone();
+        let handle = std::thread::spawn(move || checkpoint_file(&checkpoint_path));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !handle.is_finished(),
+            "checkpoint must block while a writer holds the store lock"
+        );
+        drop(lock);
+        let header = handle.join().expect("join checkpoint").expect("checkpoint");
+        assert_eq!(header.doc_count, 0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn append_waits_for_writer_lock() {
+        let path = empty_indexed_store();
+        let before = fs::metadata(&path).expect("metadata").len();
+        let lock = acquire_store_lock(&path).expect("hold store lock");
+        let append_path = path.clone();
+        let handle =
+            std::thread::spawn(move || append_record(&append_path, T_MEMORY, b"payload", true));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !handle.is_finished(),
+            "append must block while a writer holds the store lock"
+        );
+        drop(lock);
+        handle.join().expect("join append").expect("append");
+        let data = fs::read(&path).expect("read store");
+        assert!(data.len() > before as usize);
+        let header = read_header_file(&path).expect("header");
+        let records = read_records_from(&data, header.tail_start as usize).expect("tail");
+        assert_eq!(records.len(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn checkpoint_rejects_truncated_or_garbage_tail() {
+        let path = empty_indexed_store();
+        append_record(&path, T_MEMORY, b"payload", true).expect("append");
+        let len = fs::metadata(&path).expect("metadata").len();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open truncated")
+            .set_len(len - 1)
+            .expect("truncate");
+        let before = fs::read(&path).expect("read before");
+        let error = checkpoint_file(&path).expect_err("truncated tail must fail");
+        assert!(format!("{error:#}").contains("truncated"), "{error:#}");
+        assert_eq!(fs::read(&path).expect("read after"), before);
+        assert!(!path.with_file_name("cm.tmp").exists());
+
+        let garbage_path = empty_indexed_store();
+        append_record(&garbage_path, T_MEMORY, b"payload", true).expect("append");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&garbage_path)
+            .expect("open for garbage");
+        file.write_all(b"garbage!").expect("write garbage");
+        file.sync_all().expect("sync garbage");
+        let error = checkpoint_file(&garbage_path).expect_err("garbage tail must fail");
+        assert!(format!("{error:#}").contains("offset"), "{error:#}");
+        assert!(!garbage_path.with_file_name("cm.tmp").exists());
+        cleanup(&path);
+        cleanup(&garbage_path);
     }
 }
