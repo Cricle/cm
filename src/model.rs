@@ -34,6 +34,12 @@ pub(crate) struct Memory {
     pub strategy: Option<String>,
     pub score: Option<f64>,
     pub merged: bool,
+    pub valid_from: u64,
+    pub valid_to: Option<u64>,
+    pub supersedes: Vec<String>,
+    pub conflict_of: Option<String>,
+    pub trust: String,
+    pub source_commit: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,6 +67,12 @@ pub(crate) fn new_memory(
         strategy,
         score,
         merged: false,
+        valid_from: now_ms(),
+        valid_to: None,
+        supersedes: Vec::new(),
+        conflict_of: None,
+        trust: "authored".to_string(),
+        source_commit: None,
     }
 }
 
@@ -83,6 +95,12 @@ pub(crate) fn build_merged(
         Some(score),
     );
     memory.merged = true;
+    memory.valid_from = now_ms();
+    memory.valid_to = None;
+    memory.supersedes = Vec::new();
+    memory.conflict_of = None;
+    memory.trust = canonical.trust.clone();
+    memory.source_commit = canonical.source_commit.clone();
     memory
 }
 
@@ -103,11 +121,25 @@ pub(crate) fn memory_payload(memory: &Memory) -> Vec<u8> {
     if let Some(score) = memory.score {
         put_f64(&mut payload, 11, score);
     }
+    put_u64(&mut payload, 12, memory.valid_from);
+    if let Some(valid_to) = memory.valid_to {
+        put_u64(&mut payload, 13, valid_to);
+    }
+    put_texts(&mut payload, 14, &memory.supersedes);
+    if let Some(conflict_of) = &memory.conflict_of {
+        put_text(&mut payload, 15, conflict_of);
+    }
+    put_text(&mut payload, 16, &memory.trust);
+    if let Some(source_commit) = &memory.source_commit {
+        put_text(&mut payload, 17, source_commit);
+    }
     payload
 }
 
 pub(crate) fn decode_memory(payload: &[u8]) -> Result<Memory> {
     let fields = decode_fields(payload)?;
+    let created_at = get_u64(&fields, 9).unwrap_or(0);
+    let valid_from = get_u64(&fields, 12).unwrap_or(created_at);
     Ok(Memory {
         id: get_text(&fields, 1)
             .ok_or_else(|| anyhow!("memory missing id"))?
@@ -127,10 +159,16 @@ pub(crate) fn decode_memory(payload: &[u8]) -> Result<Memory> {
         source: get_text(&fields, 6).unwrap_or("").to_string(),
         confidence: get_f64(&fields, 7).unwrap_or(0.8),
         sources: get_texts(&fields, 8),
-        created_at: get_u64(&fields, 9).unwrap_or(0),
+        created_at,
         strategy: get_text(&fields, 10).map(ToString::to_string),
         score: get_f64(&fields, 11),
         merged: false,
+        valid_from,
+        valid_to: get_u64(&fields, 13),
+        supersedes: get_texts(&fields, 14),
+        conflict_of: get_text(&fields, 15).map(ToString::to_string),
+        trust: get_text(&fields, 16).unwrap_or("authored").to_string(),
+        source_commit: get_text(&fields, 17).map(ToString::to_string),
     })
 }
 
@@ -183,11 +221,13 @@ pub(crate) fn preview(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn cmx_line(memory: &Memory) -> String {
     format!(
-        "CM1{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}",
+        "CM1{}	{}	{}	{}	{}	{}	{:.2}	{}	{}	{}	{}",
         if memory.merged { "M" } else { "F" },
         clean_field(&memory.id),
         clean_field(&memory.kind),
         clean_field(&memory.scope),
+        clean_field(&memory.trust),
+        memory.valid_from,
         memory.confidence,
         clean_field(&memory.subject),
         clean_field(&memory.text),
@@ -337,8 +377,47 @@ fn get_texts(fields: &HashMap<u8, Field>, id: u8) -> Vec<String> {
 }
 
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on",
-    "or", "that", "the", "this", "to", "with",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+    "how",
+    "what",
+    "which",
+    "why",
+    "when",
+    "where",
+    "do",
+    "does",
+    "did",
+    "i",
+    "we",
+    "you",
+    "can",
+    "could",
+    "should",
+    "would",
+    "recommend",
+    "recommended",
+    "setting",
+    "configure",
 ];
 
 pub(crate) fn tokenize(text: &str) -> Vec<String> {

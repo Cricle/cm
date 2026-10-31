@@ -428,10 +428,13 @@ impl Store {
             }
         }
         for record in &records {
-            if record.rec_type == T_MERGE {
+            if record.rec_type == T_MEMORY || record.rec_type == T_MERGE {
                 if let Ok(memory) = decode_memory(record.payload()?) {
                     for source in &memory.sources {
                         hidden.insert(source.clone());
+                    }
+                    for superseded in &memory.supersedes {
+                        hidden.insert(superseded.clone());
                     }
                 }
             }
@@ -680,6 +683,11 @@ fn active_docs(records: &[Record]) -> Result<Vec<ActiveDoc<'_>>> {
         }
     }
     let mut hidden = tombstones.clone();
+    for (memory, _) in &memories {
+        for superseded in &memory.supersedes {
+            hidden.insert(superseded.clone());
+        }
+    }
     let mut valid_merges = Vec::new();
     for (memory, record) in merges {
         let invalid = tombstones.contains(&memory.id)

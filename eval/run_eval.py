@@ -68,6 +68,7 @@ def main() -> int:
     parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("fixtures") / "pi.jsonl")
     parser.add_argument("--queries", type=Path, default=Path(__file__).with_name("queries.jsonl"))
     parser.add_argument("--top", type=int, default=5)
+    parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--json-out", type=Path, help="write full metrics JSON")
     args = parser.parse_args()
 
@@ -85,7 +86,7 @@ def main() -> int:
             query = item["query"]
             scope = item.get("scope")
             expected = item.get("expected", [])
-            cmd = [cm, "search", "--file", str(store), "--query", query, "--top", str(args.top)]
+            cmd = [cm, "search", "--file", str(store), "--query", query, "--top", str(args.top), "--min-score", str(args.min_score)]
             if scope:
                 cmd += ["--scope", scope]
             payload = json.loads(run(cmd))

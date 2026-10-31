@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -39,6 +39,18 @@ struct AppendInput {
     source: String,
     #[serde(default = "default_confidence")]
     confidence: f64,
+    #[serde(default)]
+    valid_from: u64,
+    #[serde(default)]
+    valid_to: Option<u64>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    #[serde(default)]
+    conflict_of: Option<String>,
+    #[serde(default)]
+    trust: Option<String>,
+    #[serde(default)]
+    source_commit: Option<String>,
 }
 
 fn default_confidence() -> f64 {
@@ -71,6 +83,18 @@ struct MemoryOut {
     strategy: Option<String>,
     #[serde(default)]
     score: Option<f64>,
+    #[serde(default)]
+    valid_from: u64,
+    #[serde(default)]
+    valid_to: Option<u64>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    #[serde(default)]
+    conflict_of: Option<String>,
+    #[serde(default)]
+    trust: Option<String>,
+    #[serde(default)]
+    source_commit: Option<String>,
 }
 
 impl MemoryOut {
@@ -88,6 +112,16 @@ impl MemoryOut {
             strategy: self.strategy,
             score: self.score,
             merged: self.merged,
+            valid_from: if self.valid_from == 0 {
+                self.created_at
+            } else {
+                self.valid_from
+            },
+            valid_to: self.valid_to,
+            supersedes: self.supersedes,
+            conflict_of: self.conflict_of,
+            trust: self.trust.unwrap_or_else(|| "authored".to_string()),
+            source_commit: self.source_commit,
         }
     }
 }
@@ -107,6 +141,12 @@ impl From<&crate::model::Memory> for MemoryOut {
             created_at: memory.created_at,
             strategy: memory.strategy.clone(),
             score: memory.score,
+            valid_from: memory.valid_from,
+            valid_to: memory.valid_to,
+            supersedes: memory.supersedes.clone(),
+            conflict_of: memory.conflict_of.clone(),
+            trust: Some(memory.trust.clone()),
+            source_commit: memory.source_commit.clone(),
         }
     }
 }
@@ -154,6 +194,14 @@ struct MergeGroupOut {
 struct ConsolidateOut {
     groups: Vec<MergeGroupOut>,
     applied: bool,
+}
+
+#[derive(Serialize)]
+struct ConflictGroupOut {
+    scope: String,
+    kind: String,
+    subject: String,
+    records: Vec<MemoryOut>,
 }
 
 fn main() {
@@ -206,6 +254,7 @@ fn run() -> Result<()> {
                 arg_usize(&args, "--top", 8),
                 arg_value(&args, "--scope"),
                 arg_value(&args, "--kind"),
+                arg_f64(&args, "--min-score", 0.0),
             )
         }
         "similar" => {
@@ -235,6 +284,7 @@ fn run() -> Result<()> {
             cmd_forget(&arg_path(&args), &id)
         }
         "purge" => cmd_purge(&arg_path(&args)),
+        "conflicts" => cmd_conflicts(&arg_path(&args)),
         "verify" => cmd_verify(&arg_path(&args)),
         "help" | "-h" | "--help" => {
             print_usage();
@@ -260,12 +310,13 @@ fn print_usage() {
          cm skill [--json] [--install] [--check] [--dir <path>]\n\
          cm get --file cm --id <id>\n\
          cm scan [--file cm] [--limit 100] [--offset 0]\n\
-         cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>]\n\
+         cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]\n\
          cm similar --file cm --id <id> [--top 16] [--scope <scope>]\n\
          cm merge --file cm --sources <id1,id2> [--text <text>]\n\
          cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]\n\
          cm forget --file cm --id <id>\n\
          cm purge --file cm\n\
+         cm conflicts --file cm\n\
          cm verify --file cm"
     );
 }
@@ -347,17 +398,7 @@ fn cmd_append(path: &Path, input_json: &str) -> Result<()> {
     let input: AppendInput = serde_json::from_str(input_json).context("parse --json input")?;
     validate_input(&input)?;
     read_header_file(path)?;
-    let memory = new_memory(
-        &input.kind,
-        &input.scope,
-        &input.subject,
-        &input.text,
-        &input.source,
-        input.confidence.clamp(0.0, 1.0),
-        Vec::new(),
-        None,
-        None,
-    );
+    let memory = memory_from_input(&input)?;
     append_record(path, 2, &memory_payload(&memory))?;
     outln!("{}", json!({"ok": true, "id": memory.id}));
     Ok(())
@@ -399,22 +440,12 @@ fn cmd_import(path: &Path) -> Result<()> {
                     bail!("imported record has empty id");
                 }
                 validate_memory(&full.kind, &full.scope, &full.subject, &full.text)?;
+                if let Some(trust) = &full.trust {
+                    validate_trust(trust)?;
+                }
                 full.into_memory()
             }
-            ImportLine::Append(input) => {
-                validate_input(&input)?;
-                new_memory(
-                    &input.kind,
-                    &input.scope,
-                    &input.subject,
-                    &input.text,
-                    &input.source,
-                    input.confidence.clamp(0.0, 1.0),
-                    Vec::new(),
-                    None,
-                    None,
-                )
-            }
+            ImportLine::Append(input) => memory_from_input(&input)?,
         };
         let record_type = if memory.merged { 3 } else { 2 };
         writer.write_all(&crate::store::encode_record(
@@ -436,8 +467,13 @@ fn cmd_import(path: &Path) -> Result<()> {
 }
 
 fn cmd_skill(json_output: bool, install: bool, check: bool, dir: Option<String>) -> Result<()> {
+    let explicit_dir = dir.is_some();
     let dir = PathBuf::from(dir.unwrap_or_else(|| ".agents/skills/cm-memory".to_string()));
-    let path = dir.join("SKILL.md");
+    let path = if check && !explicit_dir && Path::new("assets/SKILL.md").exists() {
+        PathBuf::from("assets/SKILL.md")
+    } else {
+        dir.join("SKILL.md")
+    };
 
     if install {
         fs::create_dir_all(&dir)?;
@@ -532,6 +568,7 @@ fn cmd_search(
     top: usize,
     scope: Option<String>,
     kind: Option<String>,
+    min_score: f64,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
@@ -567,6 +604,7 @@ fn cmd_search(
     }
     let mut candidates: Vec<SearchHit> = hits
         .into_values()
+        .filter(|(bm25, _)| *bm25 >= min_score)
         .map(|(bm25, memory)| SearchHit {
             id: memory.id.clone(),
             bm25,
@@ -726,6 +764,48 @@ fn cmd_purge(path: &Path) -> Result<()> {
     outln!(
         "{}",
         json!({"ok": true, "doc_count": header.doc_count, "blocks": header.block_count})
+    );
+    Ok(())
+}
+
+fn cmd_conflicts(path: &Path) -> Result<()> {
+    let mut store = Store::open(path)?;
+    let memories = store.scan_page(usize::MAX, 0)?;
+    let mut groups: HashMap<(String, String, String), Vec<crate::model::Memory>> = HashMap::new();
+    for memory in memories {
+        groups
+            .entry((
+                memory.scope.clone(),
+                memory.kind.clone(),
+                memory.subject.clone(),
+            ))
+            .or_default()
+            .push(memory);
+    }
+    let mut conflicts = Vec::new();
+    for ((scope, kind, subject), records) in groups {
+        let mut hashes = HashSet::new();
+        for record in &records {
+            hashes.insert(crate::model::content_hash(record));
+        }
+        if hashes.len() > 1 {
+            conflicts.push(ConflictGroupOut {
+                scope,
+                kind,
+                subject,
+                records: records.iter().map(MemoryOut::from).collect(),
+            });
+        }
+    }
+    conflicts.sort_by(|a, b| {
+        a.scope
+            .cmp(&b.scope)
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.subject.cmp(&b.subject))
+    });
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({"ok": true, "conflicts": conflicts}))?
     );
     Ok(())
 }
@@ -890,6 +970,42 @@ fn cmd_consolidate(
         })?
     );
     Ok(())
+}
+
+fn validate_trust(trust: &str) -> Result<()> {
+    if matches!(trust, "authored" | "verified" | "imported" | "inferred") {
+        Ok(())
+    } else {
+        bail!("invalid trust {trust:?}; expected authored/verified/imported/inferred")
+    }
+}
+
+fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
+    validate_input(input)?;
+    let trust = input.trust.as_deref().unwrap_or("authored");
+    validate_trust(trust)?;
+    let mut memory = new_memory(
+        &input.kind,
+        &input.scope,
+        &input.subject,
+        &input.text,
+        &input.source,
+        input.confidence.clamp(0.0, 1.0),
+        Vec::new(),
+        None,
+        None,
+    );
+    memory.valid_from = if input.valid_from == 0 {
+        crate::model::now_ms()
+    } else {
+        input.valid_from
+    };
+    memory.valid_to = input.valid_to;
+    memory.supersedes = input.supersedes.clone();
+    memory.conflict_of = input.conflict_of.clone();
+    memory.trust = trust.to_string();
+    memory.source_commit = input.source_commit.clone();
+    Ok(memory)
 }
 
 fn validate_memory(kind: &str, scope: &str, subject: &str, text: &str) -> Result<()> {

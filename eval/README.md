@@ -14,13 +14,24 @@ cargo build --release
 python3 eval/run_eval.py
 ```
 
-Current baseline:
+Current baseline (default `--min-score 0`):
 
 ```text
-recall@5          0.985
-MRR               0.955
-hit@1             0.909
-no-answer accuracy 0.000
+recall@5           0.985
+MRR                0.955
+hit@1              0.909
+no-answer accuracy 0.667
 ```
 
-The no-answer result is intentionally left visible: `cm search` currently has no score threshold or abstention policy. This is the next accuracy task, not a hidden failure.
+With the documented abstention threshold:
+
+```bash
+python3 eval/run_eval.py --min-score 3.0
+```
+
+```text
+recall@5           0.985
+no-answer accuracy 1.000
+```
+
+This is why the eval deliberately reports both modes: thresholding is an explicit accuracy/precision trade-off, not a hidden default.

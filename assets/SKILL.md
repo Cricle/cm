@@ -42,6 +42,7 @@ Kinds: `fact`, `decision`, `constraint`, `preference`, `episode`, `procedure`.
 - One fact per record.
 - Include a file path or symbol for code facts.
 - Decisions include the reason.
+- Before superseding a fact, run `cm conflicts`; if it reports a conflict, keep both and let the source/user decide.
 - Never store raw transcripts, secrets, or long code blocks.
 
 ## Maintain

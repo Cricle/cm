@@ -4,10 +4,10 @@
       "active_index_docs": 18,
       "active_total": 18,
       "blocks": 1,
-      "bytes": 31845,
-      "index_bytes": 18727,
+      "bytes": 30388,
+      "index_bytes": 17243,
       "index_docs": 18,
-      "index_raw_bytes": 55576,
+      "index_raw_bytes": 55032,
       "ok": true,
       "tail_memories": 0,
       "version": 1
@@ -16,10 +16,10 @@
     "positive_queries": 22,
     "negative_queries": 3,
     "recall_at_k": 0.9848484848484849,
-    "precision_at_k": 0.30000000000000004,
+    "precision_at_k": 0.3606060606060606,
     "mrr": 0.9545454545454546,
     "hit_at_1": 0.9090909090909091,
-    "no_answer_accuracy": 0.0,
+    "no_answer_accuracy": 1.0,
     "top": 5
   },
   "details": [
@@ -53,11 +53,10 @@
         "74ede88715e85ef1dde2c82afb1e0dcb",
         "4d250285ea4f728b5cb6d6296a3348c5",
         "4a82e953c9366cca792e03c0555a99f6",
-        "4239773e0aa3650f63dc64e96b62991b",
-        "07470b0a8b09846faf2e302b54cc8f55"
+        "4239773e0aa3650f63dc64e96b62991b"
       ],
       "recall": 1.0,
-      "precision": 0.4,
+      "precision": 0.5,
       "mrr": 0.5,
       "hit_at_1": 0.0,
       "no_answer": null
@@ -110,8 +109,8 @@
         "819f2f47a626ffd999054fd2137d915b",
         "144f1301d61727ccf037198859fa11fe",
         "30aa6182ec4171e2113d45f72b9c5d5e",
-        "f9457287888269869cdf19e564638864",
-        "4d250285ea4f728b5cb6d6296a3348c5"
+        "4d250285ea4f728b5cb6d6296a3348c5",
+        "07470b0a8b09846faf2e302b54cc8f55"
       ],
       "recall": 1.0,
       "precision": 0.4,
@@ -166,7 +165,7 @@
         "4cf8caaa4ec219bef565959a3500d24b",
         "430a0eaaf993452824e2982321673ddf",
         "a466547df6e7287d7a79be119621d6cf",
-        "f9457287888269869cdf19e564638864"
+        "07470b0a8b09846faf2e302b54cc8f55"
       ],
       "recall": 1.0,
       "precision": 0.2,
@@ -237,8 +236,8 @@
       ],
       "got": [
         "07470b0a8b09846faf2e302b54cc8f55",
-        "ea3c4f95e12929800a09e214bef35d95",
         "9b5537e29e807361aa9ee4cf2a0edad3",
+        "ea3c4f95e12929800a09e214bef35d95",
         "819f2f47a626ffd999054fd2137d915b",
         "30aa6182ec4171e2113d45f72b9c5d5e"
       ],
@@ -291,13 +290,10 @@
       ],
       "got": [
         "4a82e953c9366cca792e03c0555a99f6",
-        "30aa6182ec4171e2113d45f72b9c5d5e",
-        "4d250285ea4f728b5cb6d6296a3348c5",
-        "74ede88715e85ef1dde2c82afb1e0dcb",
-        "56ad933f81b98cba01a5fd45ab13b158"
+        "30aa6182ec4171e2113d45f72b9c5d5e"
       ],
       "recall": 1.0,
-      "precision": 0.2,
+      "precision": 0.5,
       "mrr": 1.0,
       "hit_at_1": 1.0,
       "no_answer": null
@@ -327,10 +323,10 @@
       ],
       "got": [
         "f9457287888269869cdf19e564638864",
-        "e82ef888aa1b20f0464f1f8f1bda94fb",
         "4cf8caaa4ec219bef565959a3500d24b",
         "a466547df6e7287d7a79be119621d6cf",
-        "430a0eaaf993452824e2982321673ddf"
+        "e82ef888aa1b20f0464f1f8f1bda94fb",
+        "af243cff575782548ef2952a08c7df2d"
       ],
       "recall": 1.0,
       "precision": 0.2,
@@ -365,12 +361,10 @@
       "got": [
         "74ede88715e85ef1dde2c82afb1e0dcb",
         "4a82e953c9366cca792e03c0555a99f6",
-        "4d250285ea4f728b5cb6d6296a3348c5",
-        "819f2f47a626ffd999054fd2137d915b",
-        "144f1301d61727ccf037198859fa11fe"
+        "4d250285ea4f728b5cb6d6296a3348c5"
       ],
       "recall": 1.0,
-      "precision": 0.4,
+      "precision": 0.6666666666666666,
       "mrr": 1.0,
       "hit_at_1": 1.0,
       "no_answer": null
@@ -384,12 +378,10 @@
       "got": [
         "819f2f47a626ffd999054fd2137d915b",
         "144f1301d61727ccf037198859fa11fe",
-        "30aa6182ec4171e2113d45f72b9c5d5e",
-        "ea3c4f95e12929800a09e214bef35d95",
-        "4a82e953c9366cca792e03c0555a99f6"
+        "30aa6182ec4171e2113d45f72b9c5d5e"
       ],
       "recall": 1.0,
-      "precision": 0.4,
+      "precision": 0.6666666666666666,
       "mrr": 1.0,
       "hit_at_1": 1.0,
       "no_answer": null
@@ -401,13 +393,10 @@
       ],
       "got": [
         "af243cff575782548ef2952a08c7df2d",
-        "4cf8caaa4ec219bef565959a3500d24b",
-        "f9457287888269869cdf19e564638864",
-        "ea3c4f95e12929800a09e214bef35d95",
-        "430a0eaaf993452824e2982321673ddf"
+        "4cf8caaa4ec219bef565959a3500d24b"
       ],
       "recall": 1.0,
-      "precision": 0.2,
+      "precision": 0.5,
       "mrr": 1.0,
       "hit_at_1": 1.0,
       "no_answer": null
@@ -422,11 +411,10 @@
         "e70c92589dd67d0cba0b54ada472d5b9",
         "07470b0a8b09846faf2e302b54cc8f55",
         "9b5537e29e807361aa9ee4cf2a0edad3",
-        "30aa6182ec4171e2113d45f72b9c5d5e",
-        "ea3c4f95e12929800a09e214bef35d95"
+        "30aa6182ec4171e2113d45f72b9c5d5e"
       ],
       "recall": 1.0,
-      "precision": 0.4,
+      "precision": 0.5,
       "mrr": 1.0,
       "hit_at_1": 1.0,
       "no_answer": null
@@ -434,47 +422,32 @@
     {
       "query": "How do I configure Atlas Kubernetes readiness and liveness probes?",
       "expected": [],
-      "got": [
-        "f9457287888269869cdf19e564638864",
-        "a466547df6e7287d7a79be119621d6cf",
-        "74ede88715e85ef1dde2c82afb1e0dcb"
-      ],
+      "got": [],
       "recall": null,
       "precision": null,
       "mrr": null,
       "hit_at_1": null,
-      "no_answer": false
+      "no_answer": true
     },
     {
       "query": "What is the recommended Kafka retention setting for Atlas?",
       "expected": [],
-      "got": [
-        "4a82e953c9366cca792e03c0555a99f6",
-        "07470b0a8b09846faf2e302b54cc8f55",
-        "4d250285ea4f728b5cb6d6296a3348c5",
-        "144f1301d61727ccf037198859fa11fe"
-      ],
+      "got": [],
       "recall": null,
       "precision": null,
       "mrr": null,
       "hit_at_1": null,
-      "no_answer": false
+      "no_answer": true
     },
     {
       "query": "How do I rotate the Atlas KMS key atlas-pii?",
       "expected": [],
-      "got": [
-        "a466547df6e7287d7a79be119621d6cf",
-        "f9457287888269869cdf19e564638864",
-        "4cf8caaa4ec219bef565959a3500d24b",
-        "e82ef888aa1b20f0464f1f8f1bda94fb",
-        "74ede88715e85ef1dde2c82afb1e0dcb"
-      ],
+      "got": [],
       "recall": null,
       "precision": null,
       "mrr": null,
       "hit_at_1": null,
-      "no_answer": false
+      "no_answer": true
     }
   ]
 }

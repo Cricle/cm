@@ -37,12 +37,13 @@ cm export --file cm [--format cmx|jsonl]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
-cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>]
+cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
 cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]
 cm forget --file cm --id <id>
 cm purge --file cm
+cm conflicts --file cm
 cm verify --file cm
 cm skill [--json] [--install] [--check] [--dir <path>]
 ```
@@ -73,6 +74,17 @@ cm skill --install
 The skill covers recall-before-work, compact write-back, source citations, and
 `cm.lru` maintenance. It is stored in the repository at `assets/SKILL.md` and
 installed by default to `.agents/skills/cm-memory`.
+
+## Accuracy
+
+The repository includes a retrieval accuracy harness in [`eval/`](eval/). Current baseline on the `pi` fixture:
+
+```text
+Recall@5   0.985
+MRR        0.955
+Hit@1      0.909
+No-answer  0.667 (default); 1.000 with --min-score 3.0
+```
 
 ## Design
 
