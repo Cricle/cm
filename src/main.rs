@@ -274,6 +274,13 @@ fn run() -> Result<()> {
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
+        "doctor" => {
+            let ok = cmd_doctor(&arg_path(&args))?;
+            if !ok && has_flag(&args, "--strict") {
+                process::exit(1);
+            }
+            Ok(())
+        }
         "import" => cmd_import(&arg_path(&args)),
         "export" => cmd_export(
             &arg_path(&args),
@@ -374,6 +381,7 @@ fn print_usage() {
          cm recall --file cm --query <text> [--scope <scope>] [--budget 800]
          cm forget --file cm --id <id>
          cm status [--file cm]
+         cm doctor [--strict] [--file cm]
          cm skill [--json] [--install] [--check]
          
          Internal/advanced commands: see README."
@@ -611,6 +619,9 @@ fn cmd_reindex(path: &Path) -> Result<()> {
 fn cmd_get(path: &Path, id: &str) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
+    if tail.hidden.contains(id) {
+        bail!("memory not found: {id}");
+    }
     let memory = if let Some((_, memory)) = store.find_doc(id)? {
         memory
     } else {
@@ -836,6 +847,9 @@ fn cmd_context(
 fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
+    if tail.hidden.contains(id) {
+        bail!("memory not found: {id}");
+    }
     let (target, target_idx) = if let Some((idx, memory)) = store.find_doc(id)? {
         (memory, Some(idx))
     } else {
@@ -909,6 +923,9 @@ fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
     let tail = store.tail_view()?;
     let mut selected = Vec::new();
     for id in &source_ids {
+        if tail.hidden.contains(id) {
+            bail!("active memory not found: {id}");
+        }
         let memory = if let Some((_, memory)) = store.find_doc(id)? {
             memory
         } else {
@@ -949,7 +966,8 @@ fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
 fn cmd_forget(path: &Path, id: &str) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
-    let exists = store.find_doc(id)?.is_some() || tail.get(id).is_some();
+    let exists =
+        !tail.hidden.contains(id) && (store.find_doc(id)?.is_some() || tail.get(id).is_some());
     if !exists {
         bail!("active memory not found: {id}");
     }
@@ -973,7 +991,37 @@ fn cmd_purge(path: &Path) -> Result<()> {
 
 fn cmd_conflicts(path: &Path) -> Result<()> {
     let mut store = Store::open(path)?;
-    let memories = store.scan_page(usize::MAX, 0)?;
+    let memories = active_memories(&mut store)?;
+    let conflicts = conflict_groups(memories);
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({"ok": true, "conflicts": conflicts}))?
+    );
+    Ok(())
+}
+
+/// Active memories in the canonical verify accounting: index docs flagged
+/// active in the bitset minus tail-hidden ids, plus active tail memories.
+/// Decodes each active doc once; never scans inactive docs.
+fn active_memories(store: &mut Store) -> Result<Vec<crate::model::Memory>> {
+    let tail = store.tail_view()?;
+    let mut memories = Vec::new();
+    for idx in 0..store.doc_count() {
+        if !store.is_active(idx)? {
+            continue;
+        }
+        let meta = store.doc_meta(idx)?;
+        let memory = store.doc_memory(&meta)?;
+        if tail.hidden.contains(&memory.id) {
+            continue;
+        }
+        memories.push(memory);
+    }
+    memories.extend(tail.memories);
+    Ok(memories)
+}
+
+fn conflict_groups(memories: Vec<crate::model::Memory>) -> Vec<ConflictGroupOut> {
     let mut groups: HashMap<(String, String, String), Vec<crate::model::Memory>> = HashMap::new();
     for memory in memories {
         groups
@@ -1006,20 +1054,114 @@ fn cmd_conflicts(path: &Path) -> Result<()> {
             .then_with(|| a.kind.cmp(&b.kind))
             .then_with(|| a.subject.cmp(&b.subject))
     });
-    outln!(
-        "{}",
-        serde_json::to_string(&json!({"ok": true, "conflicts": conflicts}))?
-    );
-    Ok(())
+    conflicts
 }
 
-fn cmd_verify(path: &Path, full: bool) -> Result<()> {
-    let full_records = if full {
-        Some(crate::store::verify_full(path)?)
-    } else {
-        None
+const DOCTOR_WARNING_CAP: usize = 200;
+
+fn append_conflict_warnings(warnings: &mut Vec<String>, groups: &[ConflictGroupOut]) {
+    for group in groups.iter().take(DOCTOR_WARNING_CAP) {
+        warnings.push(format!(
+            "conflict: scope={} kind={} subject={} records={}",
+            group.scope,
+            group.kind,
+            group.subject,
+            group.records.len()
+        ));
+    }
+    if groups.len() > DOCTOR_WARNING_CAP {
+        warnings.push(format!(
+            "conflict: {} more not shown",
+            groups.len() - DOCTOR_WARNING_CAP
+        ));
+    }
+}
+
+fn cmd_doctor(path: &Path) -> Result<bool> {
+    let full = crate::store::verify_full(path);
+    let (full_checksum, full_records, checksum_error) = match full {
+        Ok(records) => (true, Some(records), None),
+        Err(error) => (
+            false,
+            None,
+            Some(format!("full checksum failed: {error:#}")),
+        ),
     };
-    let mut store = Store::open(path)?;
+
+    let mut warnings = Vec::new();
+    let mut store_ok = true;
+    let mut active_total = 0u64;
+    let mut expired = 0u64;
+    let mut conflicts = 0usize;
+
+    match Store::open(path) {
+        Ok(mut store) => match active_memories(&mut store) {
+            Ok(memories) => {
+                active_total = memories.len() as u64;
+                let now = crate::model::now_ms();
+
+                let mut expired_warnings = 0usize;
+                for memory in &memories {
+                    if let Some(end) = memory.valid_to {
+                        if end <= now {
+                            expired += 1;
+                            if expired_warnings < DOCTOR_WARNING_CAP {
+                                warnings.push(format!(
+                                    "expired: {} scope={} kind={} subject={} valid_to={end}",
+                                    memory.id, memory.scope, memory.kind, memory.subject
+                                ));
+                                expired_warnings += 1;
+                            }
+                        }
+                    }
+                }
+                if expired > expired_warnings as u64 {
+                    warnings.push(format!(
+                        "expired: {} more not shown",
+                        expired - expired_warnings as u64
+                    ));
+                }
+
+                let groups = conflict_groups(memories);
+                conflicts = groups.len();
+                append_conflict_warnings(&mut warnings, &groups);
+            }
+            Err(error) => {
+                store_ok = false;
+                active_total = store.active_count();
+                warnings.push(format!("active scan failed: {error:#}"));
+            }
+        },
+        Err(error) => {
+            store_ok = false;
+            warnings.push(format!("store open failed: {error:#}"));
+        }
+    }
+    if let Some(error) = checksum_error {
+        warnings.push(error);
+    }
+
+    let cache_bytes = fs::metadata(path.with_file_name("cm.lru"))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let ok = store_ok && conflicts == 0 && expired == 0 && full_checksum;
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ok": ok,
+            "active_total": active_total,
+            "conflicts": conflicts,
+            "expired": expired,
+            "full_checksum": full_checksum,
+            "full_records": full_records,
+            "cache_bytes": cache_bytes,
+            "warnings": warnings
+        }))?
+    );
+    Ok(ok)
+}
+
+fn active_metrics(store: &mut Store) -> Result<(u64, usize)> {
     let tail = store.tail_view()?;
     let mut active_index = store.active_count();
     for id in &tail.hidden {
@@ -1029,6 +1171,17 @@ fn cmd_verify(path: &Path, full: bool) -> Result<()> {
             }
         }
     }
+    Ok((active_index, tail.memories.len()))
+}
+
+fn cmd_verify(path: &Path, full: bool) -> Result<()> {
+    let full_records = if full {
+        Some(crate::store::verify_full(path)?)
+    } else {
+        None
+    };
+    let mut store = Store::open(path)?;
+    let (active_index, tail_memories) = active_metrics(&mut store)?;
     outln!(
         "{}",
         json!({
@@ -1038,8 +1191,8 @@ fn cmd_verify(path: &Path, full: bool) -> Result<()> {
             "blocks": store.header.block_count,
             "index_docs": store.header.doc_count,
             "active_index_docs": active_index,
-            "tail_memories": tail.memories.len(),
-            "active_total": active_index + tail.memories.len() as u64,
+            "tail_memories": tail_memories,
+            "active_total": active_index + tail_memories as u64,
             "index_bytes": store.header.index_len,
             "index_raw_bytes": store.header.index_raw_len,
             "full_checksum": full,
@@ -1268,4 +1421,120 @@ fn arg_f64(args: &[String], flag: &str, default: f64) -> f64 {
 }
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store_dir() -> PathBuf {
+        let dir = env::temp_dir().join(format!("cm-doctor-test-{}", crate::model::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn doctor_flags_truncated_tail_record() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        let input = AppendInput {
+            kind: "fact".to_string(),
+            scope: "test".to_string(),
+            subject: "tail subject".to_string(),
+            text: "tail body".to_string(),
+            source: "audit".to_string(),
+            confidence: 0.9,
+            valid_from: 0,
+            valid_to: None,
+            supersedes: Vec::new(),
+            conflict_of: None,
+            trust: Some("verified".to_string()),
+            source_commit: None,
+        };
+        cmd_append_input(&path, &input, true).expect("append");
+        assert!(cmd_doctor(&path).expect("healthy doctor"));
+
+        let len = fs::metadata(&path).expect("metadata").len();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncate")
+            .set_len(len - 1)
+            .expect("truncate");
+        assert!(!cmd_doctor(&path).expect("doctor after truncate"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn doctor_flags_corrupt_index_with_warm_cache() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        assert!(cmd_doctor(&path).expect("healthy doctor"));
+
+        let header = read_header_file(&path).expect("read header");
+        assert!(header.index_len > 2);
+        let mut bytes = fs::read(&path).expect("read store");
+        bytes[header.index_off as usize + 1] ^= 0xFF;
+        fs::write(&path, &bytes).expect("write corrupt store");
+
+        assert!(!cmd_doctor(&path).expect("doctor after index corruption"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_get_and_forget_hide_tombstoned_index_records() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        let input = AppendInput {
+            kind: "fact".to_string(),
+            scope: "test".to_string(),
+            subject: "forgotten subject".to_string(),
+            text: "forgotten body".to_string(),
+            source: "audit".to_string(),
+            confidence: 0.9,
+            valid_from: 0,
+            valid_to: None,
+            supersedes: Vec::new(),
+            conflict_of: None,
+            trust: Some("verified".to_string()),
+            source_commit: None,
+        };
+        cmd_append_input(&path, &input, true).expect("append");
+        cmd_reindex(&path).expect("reindex");
+        let id = {
+            let mut store = Store::open(&path).expect("open");
+            store.scan_page(usize::MAX, 0).expect("scan")[0].id.clone()
+        };
+        cmd_forget(&path, &id).expect("forget");
+        let mut store = Store::open(&path).expect("open after forget");
+        assert!(store
+            .scan_page(usize::MAX, 0)
+            .expect("scan after forget")
+            .is_empty());
+        assert!(cmd_get(&path, &id).is_err());
+        assert!(cmd_forget(&path, &id).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn doctor_conflict_warnings_are_capped() {
+        let groups: Vec<ConflictGroupOut> = (0..DOCTOR_WARNING_CAP + 3)
+            .map(|idx| ConflictGroupOut {
+                scope: "test".to_string(),
+                kind: "fact".to_string(),
+                subject: format!("subject-{idx}"),
+                records: Vec::new(),
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        append_conflict_warnings(&mut warnings, &groups);
+        assert_eq!(warnings.len(), DOCTOR_WARNING_CAP + 1);
+        assert_eq!(
+            warnings.last().map(String::as_str),
+            Some("conflict: 3 more not shown")
+        );
+    }
 }

@@ -447,6 +447,7 @@ impl Store {
     }
 
     pub(crate) fn scan_page(&mut self, limit: usize, offset: usize) -> Result<Vec<Memory>> {
+        let tail = self.tail_view()?;
         let mut skipped = offset;
         let mut out = Vec::new();
         let doc_count = self.doc_count();
@@ -456,6 +457,9 @@ impl Store {
             }
             let meta = self.doc_meta(idx)?;
             let memory = self.doc_memory(&meta)?;
+            if tail.hidden.contains(&memory.id) {
+                continue;
+            }
             if skipped > 0 {
                 skipped -= 1;
                 continue;
@@ -465,7 +469,6 @@ impl Store {
                 return Ok(out);
             }
         }
-        let tail = self.tail_view()?;
         let mut tail_memories = tail.memories;
         tail_memories.sort_by(|a, b| {
             a.created_at
@@ -634,14 +637,41 @@ pub(crate) fn append_record(
 }
 
 pub(crate) fn read_records_from(data: &[u8], start: usize) -> Result<Vec<Record>> {
+    Ok(read_records_from_impl(data, start, false)?.0)
+}
+
+/// Like `read_records_from`, but rejects a truncated record or trailing bytes
+/// instead of silently ignoring them. Used by `verify_full` so `cm doctor`
+/// cannot report a healthy file after tail data loss or garbage was appended.
+fn read_records_from_checked(data: &[u8], start: usize) -> Result<Vec<Record>> {
+    let (records, offset) = read_records_from_impl(data, start, true)?;
+    if offset != data.len() {
+        bail!(
+            "record data ends at offset {offset}, file has {} bytes",
+            data.len()
+        );
+    }
+    Ok(records)
+}
+
+fn read_records_from_impl(data: &[u8], start: usize, strict: bool) -> Result<(Vec<Record>, usize)> {
+    if start > data.len() {
+        bail!("record start {start} beyond end of data ({})", data.len());
+    }
     let mut offset = start;
     let mut records = Vec::new();
     while offset < data.len() {
         if data.len() - offset < 4 {
+            if strict {
+                bail!("truncated record header at offset {offset}");
+            }
             break;
         }
         let body_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         if !(10..=MAX_BODY).contains(&body_len) || data.len() - offset < 4 + body_len + 8 {
+            if strict {
+                bail!("truncated or invalid record at offset {offset}");
+            }
             break;
         }
         let body_end = offset + 4 + body_len;
@@ -655,7 +685,7 @@ pub(crate) fn read_records_from(data: &[u8], start: usize) -> Result<Vec<Record>
         });
         offset = body_end + 8;
     }
-    Ok(records)
+    Ok((records, offset))
 }
 
 pub(crate) fn read_all_records(data: &[u8], header: &Header) -> Result<Vec<Record>> {
@@ -736,12 +766,29 @@ pub(crate) fn verify_full(path: &Path) -> Result<u64> {
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
     let header = decode_header(&mmap)?;
+    if header.index_len > 0 {
+        let index_start = header.index_off as usize;
+        let index_end = index_start
+            .checked_add(header.index_len as usize)
+            .context("index length overflow")?;
+        if index_end > mmap.len() {
+            bail!("index out of bounds");
+        }
+        let index_raw =
+            zstd::bulk::decompress(&mmap[index_start..index_end], header.index_raw_len as usize)
+                .context("decompress index")?;
+        if index_raw.len() != header.index_raw_len as usize
+            || xxh3_64(&index_raw) != header.index_hash
+        {
+            bail!("index hash mismatch");
+        }
+    }
     let mut count = 0u64;
     for block_id in 0..header.block_count as u32 {
         let raw = decompress_block(&mmap, &header, block_id)?;
-        count += read_records_from(&raw, 0)?.len() as u64;
+        count += read_records_from_checked(&raw, 0)?.len() as u64;
     }
-    count += read_records_from(&mmap, header.tail_start as usize)?.len() as u64;
+    count += read_records_from_checked(&mmap, header.tail_start as usize)?.len() as u64;
     Ok(count)
 }
 
@@ -1079,4 +1126,42 @@ fn write_f64(data: &mut [u8], offset: usize, value: f64) {
 }
 fn align8(value: usize) -> usize {
     (value + 7) & !7
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{memory_payload, new_memory};
+
+    fn sample_record() -> Vec<u8> {
+        let memory = new_memory(
+            "fact",
+            "test",
+            "subject",
+            "body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        encode_record(T_MEMORY, 0, &memory_payload(&memory)).expect("encode record")
+    }
+
+    #[test]
+    fn checked_reader_accepts_complete_record() {
+        let record = sample_record();
+        let records = read_records_from_checked(&record, 0).expect("complete record");
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn checked_reader_rejects_truncated_record_and_trailing_bytes() {
+        let record = sample_record();
+        assert!(read_records_from_checked(&record[..record.len() - 1], 0).is_err());
+
+        let mut padded = record;
+        padded.extend_from_slice(b"junk");
+        assert!(read_records_from_checked(&padded, 0).is_err());
+    }
 }

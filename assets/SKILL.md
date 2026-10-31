@@ -34,8 +34,9 @@ $CM remember --file "$F" --kind decision --scope <scope> \
   --source "path:symbol" --trust authored
 ```
 
-- One fact per record.
-- Include paths/symbols for code facts.
+- Write at decision time, not as a final memory pass; one decision per record.
+- Keep text under ~400 chars: what changed, why, file/symbol. No progress logs, timelines, or transcripts.
+- Use `path:symbol` as source for code facts, `agent:<name>` for decisions.
 - Before superseding, run `cm conflicts`; keep both on conflict.
 - Never store raw transcripts, secrets, or long code blocks.
 

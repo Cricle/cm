@@ -32,10 +32,11 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800]
 cm forget --file cm --id <id>
 cm status [--file cm]
+cm doctor [--strict] [--file cm]
 cm skill [--json] [--install] [--check]
 ```
 
-`recall` returns at most 3 compact memories and respects the token budget. Read commands may create or update the disposable `cm.lru` cache; `cm` remains unchanged.
+`recall` returns at most 3 compact memories and respects the token budget. `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a problem. Read commands may create or update the disposable `cm.lru` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -55,6 +56,7 @@ cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--thresh
 cm forget --file cm --id <id>
 cm purge --file cm
 cm conflicts --file cm
+cm doctor [--strict] [--file cm]
 cm verify --file cm [--full]
 cm skill [--json] [--install] [--check] [--dir <path>]
 ```
