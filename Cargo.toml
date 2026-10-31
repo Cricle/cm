@@ -1,0 +1,32 @@
+[package]
+name = "cm-memory"
+version = "1.0.0"
+edition = "2021"
+description = "Single-file compressed memory store for AI agents"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/cm-memory"
+repository = "https://github.com/Cricle/cm"
+homepage = "https://github.com/Cricle/cm"
+keywords = ["memory", "ai", "agent", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+include = ["src/**", "assets/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[[bin]]
+name = "cm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = { version = "0.13", default-features = false }
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
