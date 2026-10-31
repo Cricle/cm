@@ -35,7 +35,7 @@ cm status [--file cm]
 cm skill [--json] [--install] [--check]
 ```
 
-`recall` returns at most 3 compact memories and respects the token budget.
+`recall` returns at most 3 compact memories and respects the token budget. Read commands may create or update the disposable `cm.lru` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
