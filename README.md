@@ -38,6 +38,7 @@ cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]
+cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
 cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]

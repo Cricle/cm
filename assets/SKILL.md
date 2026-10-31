@@ -23,6 +23,7 @@ If this skill file is unavailable, run `cm skill` or `cm skill --install`. If `c
 Search by task, not by scanning everything:
 
 ```bash
+$CM context --file "$F" --query "<task>" --budget 2000 --scope <scope>
 $CM search --file "$F" --query "<task keywords>" --top 8 --scope <scope>
 $CM get --file "$F" --id <id>
 ```

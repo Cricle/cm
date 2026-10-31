@@ -177,6 +177,14 @@ struct SearchOut {
 }
 
 #[derive(Serialize)]
+struct ContextOut {
+    query: String,
+    budget: usize,
+    estimated_tokens: usize,
+    memories: Vec<MemoryOut>,
+}
+
+#[derive(Serialize)]
 struct SimilarOut {
     id: String,
     candidates: Vec<CandidateOut>,
@@ -257,6 +265,20 @@ fn run() -> Result<()> {
                 arg_f64(&args, "--min-score", 0.0),
             )
         }
+        "context" => {
+            let query =
+                arg_value(&args, "--query").ok_or_else(|| anyhow!("context requires --query"))?;
+            cmd_context(
+                &arg_path(&args),
+                &query,
+                arg_usize(&args, "--budget", 2000),
+                arg_usize(&args, "--top", 32),
+                arg_value(&args, "--scope"),
+                arg_value(&args, "--kind"),
+                arg_value(&args, "--min-trust"),
+                arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
+            )
+        }
         "similar" => {
             let id = arg_value(&args, "--id").ok_or_else(|| anyhow!("similar requires --id"))?;
             cmd_similar(
@@ -311,6 +333,7 @@ fn print_usage() {
          cm get --file cm --id <id>\n\
          cm scan [--file cm] [--limit 100] [--offset 0]\n\
          cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]\n\
+         cm context --file cm --query <text> [--budget 2000] [--top 32] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]\n\
          cm similar --file cm --id <id> [--top 16] [--scope <scope>]\n\
          cm merge --file cm --sources <id1,id2> [--text <text>]\n\
          cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]\n\
@@ -627,6 +650,121 @@ fn cmd_search(
             candidates
         })?
     );
+    Ok(())
+}
+
+fn trust_rank(trust: &str) -> i32 {
+    match trust {
+        "verified" => 3,
+        "authored" => 2,
+        "imported" => 1,
+        "inferred" => 0,
+        _ => -1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_context(
+    path: &Path,
+    query: &str,
+    budget: usize,
+    top: usize,
+    scope: Option<String>,
+    kind: Option<String>,
+    min_trust: Option<String>,
+    format: String,
+) -> Result<()> {
+    let mut store = Store::open(path)?;
+    let tail = store.tail_view()?;
+    let now = crate::model::now_ms();
+    let min_rank = match min_trust.as_deref() {
+        Some(value) => trust_rank(value),
+        None => -1,
+    };
+    if min_rank < 0 && min_trust.is_some() {
+        bail!("invalid trust level {:?}", min_trust);
+    }
+    let scope_id = scope.as_deref().and_then(|value| store.scope_id(value));
+    let kind_id = match kind.as_deref() {
+        Some(value) => match kind_id(value) {
+            Some(id) => Some(id),
+            None => {
+                bail!("invalid kind {:?}", value);
+            }
+        },
+        None => None,
+    };
+    let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
+    if scope.is_none() || scope_id.is_some() {
+        for (doc_idx, score) in store.bm25(
+            query,
+            scope_id,
+            kind_id,
+            None,
+            top.saturating_mul(4).min(256),
+        )? {
+            let meta = store.doc_meta(doc_idx)?;
+            let memory = store.doc_memory(&meta)?;
+            if tail.hidden.contains(&memory.id) {
+                continue;
+            }
+            hits.insert(memory.id.clone(), (score, memory));
+        }
+    }
+    for (score, memory) in tail.bm25(
+        query,
+        scope.as_deref(),
+        kind.as_deref(),
+        None,
+        top.saturating_mul(4).min(256),
+    ) {
+        hits.insert(memory.id.clone(), (score, memory));
+    }
+    let mut candidates: Vec<(f64, crate::model::Memory)> = hits
+        .into_values()
+        .filter(|(_, memory)| {
+            let not_expired = memory.valid_to.is_none_or(|end| end > now);
+            let trust_ok = trust_rank(&memory.trust) >= min_rank;
+            not_expired && trust_ok
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut selected = Vec::new();
+    let mut estimated = 0usize;
+    for (_, memory) in candidates {
+        let line = cmx_line(&memory);
+        let line_tokens = line.chars().count().div_ceil(4);
+        if estimated + line_tokens > budget && !selected.is_empty() {
+            break;
+        }
+        if estimated + line_tokens > budget {
+            continue;
+        }
+        estimated += line_tokens;
+        selected.push(memory);
+    }
+
+    match format.as_str() {
+        "cmx" => {
+            outln!("CMX/1");
+            for memory in &selected {
+                outln!("{}", cmx_line(memory));
+            }
+        }
+        "json" => {
+            outln!(
+                "{}",
+                serde_json::to_string(&ContextOut {
+                    query: query.to_string(),
+                    budget,
+                    estimated_tokens: estimated,
+                    memories: selected.iter().map(MemoryOut::from).collect(),
+                })?
+            );
+        }
+        other => bail!("invalid context format {other:?}; expected cmx or json"),
+    }
     Ok(())
 }
 
