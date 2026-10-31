@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ -f target/release/cm ]; then
+            cp target/release/cm dist/cm
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum dist/cm > dist/cm.sha256; else shasum -a 256 dist/cm > dist/cm.sha256; fi
+          else
+            cp target/release/cm.exe dist/cm.exe
+            if command -v sha256sum >/dev/null 2>&1; then sha256sum dist/cm.exe > dist/cm.exe.sha256; else shasum -a 256 dist/cm.exe > dist/cm.exe.sha256; fi
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cm-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*

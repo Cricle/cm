@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+
+use fs2::FileExt;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -230,7 +232,7 @@ fn run() -> Result<()> {
         "append" => {
             let input =
                 arg_value(&args, "--json").ok_or_else(|| anyhow!("append requires --json"))?;
-            cmd_append(&arg_path(&args), &input)
+            cmd_append(&arg_path(&args), &input, has_flag(&args, "--durable"))
         }
         "import" => cmd_import(&arg_path(&args)),
         "export" => cmd_export(
@@ -263,6 +265,8 @@ fn run() -> Result<()> {
                 arg_value(&args, "--scope"),
                 arg_value(&args, "--kind"),
                 arg_f64(&args, "--min-score", 0.0),
+                arg_value(&args, "--min-trust"),
+                has_flag(&args, "--include-expired"),
             )
         }
         "context" => {
@@ -307,7 +311,7 @@ fn run() -> Result<()> {
         }
         "purge" => cmd_purge(&arg_path(&args)),
         "conflicts" => cmd_conflicts(&arg_path(&args)),
-        "verify" => cmd_verify(&arg_path(&args)),
+        "verify" => cmd_verify(&arg_path(&args), has_flag(&args, "--full")),
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -325,14 +329,14 @@ fn print_usage() {
         "cm 1.0.0 - single-file compressed mmap memory\n\
          \n\
          cm init [--file cm] [--empty]\n\
-         cm append --file cm --json '<json>'\n\
+         cm append --file cm --json '<json>' [--durable]\n\
          cm import --file cm < records.jsonl\n\
          cm export --file cm [--format cmx|jsonl]\n\
          cm reindex [--file cm]\n\
          cm skill [--json] [--install] [--check] [--dir <path>]\n\
          cm get --file cm --id <id>\n\
          cm scan [--file cm] [--limit 100] [--offset 0]\n\
-         cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]\n\
+         cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]\n\
          cm context --file cm --query <text> [--budget 2000] [--top 32] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]\n\
          cm similar --file cm --id <id> [--top 16] [--scope <scope>]\n\
          cm merge --file cm --sources <id1,id2> [--text <text>]\n\
@@ -340,7 +344,7 @@ fn print_usage() {
          cm forget --file cm --id <id>\n\
          cm purge --file cm\n\
          cm conflicts --file cm\n\
-         cm verify --file cm"
+         cm verify --file cm [--full]"
     );
 }
 
@@ -417,12 +421,12 @@ fn cmd_init(path: &Path, empty: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_append(path: &Path, input_json: &str) -> Result<()> {
+fn cmd_append(path: &Path, input_json: &str, durable: bool) -> Result<()> {
     let input: AppendInput = serde_json::from_str(input_json).context("parse --json input")?;
     validate_input(&input)?;
     read_header_file(path)?;
     let memory = memory_from_input(&input)?;
-    append_record(path, 2, &memory_payload(&memory))?;
+    append_record(path, 2, &memory_payload(&memory), durable)?;
     outln!("{}", json!({"ok": true, "id": memory.id}));
     Ok(())
 }
@@ -448,7 +452,8 @@ fn cmd_export(path: &Path, format: String) -> Result<()> {
 
 fn cmd_import(path: &Path) -> Result<()> {
     read_header_file(path)?;
-    let file = OpenOptions::new().append(true).open(path)?;
+    let file = OpenOptions::new().read(true).append(true).open(path)?;
+    file.lock_exclusive()?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     let mut count = 0u64;
     for line in io::stdin().lock().lines() {
@@ -480,7 +485,11 @@ fn cmd_import(path: &Path) -> Result<()> {
     }
     writer.flush()?;
     writer.get_ref().sync_all()?;
-    drop(writer);
+    let lock_file = writer
+        .into_inner()
+        .map_err(|error| anyhow!("flush import: {error}"))?;
+    let _ = lock_file.unlock();
+    drop(lock_file);
     reindex_file(path)?;
     outln!(
         "{}",
@@ -585,6 +594,7 @@ fn cmd_scan(path: &Path, limit: usize, offset: usize) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     path: &Path,
     query: &str,
@@ -592,6 +602,8 @@ fn cmd_search(
     scope: Option<String>,
     kind: Option<String>,
     min_score: f64,
+    min_trust: Option<String>,
+    include_expired: bool,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
@@ -612,6 +624,14 @@ fn cmd_search(
         },
         None => None,
     };
+    let min_rank = match min_trust.as_deref() {
+        Some(value) => trust_rank(value),
+        None => -1,
+    };
+    if min_trust.is_some() && min_rank < 0 {
+        bail!("invalid trust level {:?}", min_trust);
+    }
+    let now = crate::model::now_ms();
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if scope.is_none() || scope_id.is_some() {
         for (doc_idx, score) in store.bm25(query, scope_id, kind_id, None, top.min(100))? {
@@ -627,7 +647,11 @@ fn cmd_search(
     }
     let mut candidates: Vec<SearchHit> = hits
         .into_values()
-        .filter(|(bm25, _)| *bm25 >= min_score)
+        .filter(|(bm25, memory)| {
+            *bm25 >= min_score
+                && (include_expired || memory.valid_to.is_none_or(|end| end > now))
+                && trust_rank(&memory.trust) >= min_rank
+        })
         .map(|(bm25, memory)| SearchHit {
             id: memory.id.clone(),
             bm25,
@@ -873,7 +897,7 @@ fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
         "manual",
         1.0,
     );
-    append_record(path, 3, &memory_payload(&merged))?;
+    append_record(path, 3, &memory_payload(&merged), false)?;
     outln!(
         "{}",
         json!({"ok": true, "id": merged.id, "sources": source_ids})
@@ -892,7 +916,7 @@ fn cmd_forget(path: &Path, id: &str) -> Result<()> {
     put_text(&mut payload, 1, id);
     put_text(&mut payload, 2, "user_request");
     put_u64(&mut payload, 3, crate::model::now_ms());
-    append_record(path, 4, &payload)?;
+    append_record(path, 4, &payload, false)?;
     outln!("{}", json!({"ok": true, "target": id}));
     Ok(())
 }
@@ -948,7 +972,12 @@ fn cmd_conflicts(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_verify(path: &Path) -> Result<()> {
+fn cmd_verify(path: &Path, full: bool) -> Result<()> {
+    let full_records = if full {
+        Some(crate::store::verify_full(path)?)
+    } else {
+        None
+    };
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
     let mut active_index = store.active_count();
@@ -971,7 +1000,9 @@ fn cmd_verify(path: &Path) -> Result<()> {
             "tail_memories": tail.memories.len(),
             "active_total": active_index + tail.memories.len() as u64,
             "index_bytes": store.header.index_len,
-            "index_raw_bytes": store.header.index_raw_len
+            "index_raw_bytes": store.header.index_raw_len,
+            "full_checksum": full,
+            "full_records": full_records
         })
     );
     Ok(())
@@ -1097,7 +1128,7 @@ fn cmd_consolidate(
     }
     if apply {
         for merged in &pending {
-            append_record(path, 3, &memory_payload(merged))?;
+            append_record(path, 3, &memory_payload(merged), false)?;
         }
     }
     outln!(

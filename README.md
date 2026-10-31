@@ -24,20 +24,20 @@ cm append --file cm --json '{"kind":"fact","scope":"repo","subject":"build","tex
 cm search --file cm --query "build" --top 5
 cm get --file cm --id <id>
 cm scan --file cm --limit 20
-cm verify --file cm
+cm verify --file cm [--full]
 ```
 
 ## Commands
 
 ```text
 cm init [--file cm] [--empty]
-cm append --file cm --json '<json>'
+cm append --file cm --json '<json>' [--durable]
 cm import --file cm < records.jsonl
 cm export --file cm [--format cmx|jsonl]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
-cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>]
+cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
@@ -45,7 +45,7 @@ cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--thresh
 cm forget --file cm --id <id>
 cm purge --file cm
 cm conflicts --file cm
-cm verify --file cm
+cm verify --file cm [--full]
 cm skill [--json] [--install] [--check] [--dir <path>]
 ```
 

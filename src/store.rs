@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use memmap2::Mmap;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -614,10 +615,21 @@ pub(crate) fn read_header_file(path: &Path) -> Result<Header> {
     decode_header(&bytes)
 }
 
-pub(crate) fn append_record(path: &Path, rec_type: u8, payload: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new().append(true).open(path)?;
+pub(crate) fn append_record(
+    path: &Path,
+    rec_type: u8,
+    payload: &[u8],
+    durable: bool,
+) -> Result<()> {
+    let mut file = OpenOptions::new().read(true).append(true).open(path)?;
+    file.lock_exclusive()?;
     file.write_all(&encode_record(rec_type, 0, payload)?)?;
-    file.flush()?;
+    if durable {
+        file.sync_all()?;
+    } else {
+        file.flush()?;
+    }
+    let _ = file.unlock();
     Ok(())
 }
 
@@ -718,6 +730,19 @@ fn active_docs(records: &[Record]) -> Result<Vec<ActiveDoc<'_>>> {
             .then_with(|| a.memory.id.cmp(&b.memory.id))
     });
     Ok(active)
+}
+
+pub(crate) fn verify_full(path: &Path) -> Result<u64> {
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let header = decode_header(&mmap)?;
+    let mut count = 0u64;
+    for block_id in 0..header.block_count as u32 {
+        let raw = decompress_block(&mmap, &header, block_id)?;
+        count += read_records_from(&raw, 0)?.len() as u64;
+    }
+    count += read_records_from(&mmap, header.tail_start as usize)?.len() as u64;
+    Ok(count)
 }
 
 pub(crate) fn reindex_file(path: &Path) -> Result<Header> {

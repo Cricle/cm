@@ -606,3 +606,47 @@ impl Dsu {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_payload_roundtrip_preserves_provenance() {
+        let mut memory = new_memory(
+            "fact",
+            "repo",
+            "database",
+            "PostgreSQL 16 is primary",
+            "README.md",
+            0.9,
+            vec!["source-id".to_string()],
+            Some("manual".to_string()),
+            Some(0.8),
+        );
+        memory.valid_from = 1234;
+        memory.valid_to = Some(5678);
+        memory.supersedes = vec!["old-id".to_string()];
+        memory.conflict_of = Some("conflict-id".to_string());
+        memory.trust = "verified".to_string();
+        memory.source_commit = Some("abc123".to_string());
+
+        let encoded = memory_payload(&memory);
+        let decoded = decode_memory(&encoded).expect("decode");
+        assert_eq!(decoded.id, memory.id);
+        assert_eq!(decoded.valid_from, 1234);
+        assert_eq!(decoded.valid_to, Some(5678));
+        assert_eq!(decoded.supersedes, vec!["old-id"]);
+        assert_eq!(decoded.conflict_of.as_deref(), Some("conflict-id"));
+        assert_eq!(decoded.trust, "verified");
+        assert_eq!(decoded.source_commit.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn tokenizer_handles_ascii_and_cjk() {
+        let tokens = tokenize("topic 使用 memory 16");
+        assert!(tokens.iter().any(|token| token == "topic"));
+        assert!(tokens.iter().any(|token| token == "使用"));
+        assert!(tokens.iter().any(|token| token == "memory"));
+    }
+}
