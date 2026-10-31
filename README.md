@@ -20,14 +20,24 @@ The installed binary is `cm`.
 
 ```bash
 cm init --file cm
-cm append --file cm --json '{"kind":"fact","scope":"repo","subject":"build","text":"Uses Rust 2021","source":"README","confidence":0.9}'
-cm search --file cm --query "build" --top 5
-cm get --file cm --id <id>
-cm scan --file cm --limit 20
-cm verify --file cm [--full]
+cm remember --file cm --subject "build" --text "Uses Rust 2021" --scope repo --source README
+cm recall --file cm --query "build" --scope repo --budget 500
+cm status --file cm
 ```
 
-## Commands
+## Everyday use
+
+```text
+cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo]
+cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800]
+cm forget --file cm --id <id>
+cm status [--file cm]
+cm skill [--json] [--install] [--check]
+```
+
+`recall` returns at most 3 compact memories and respects the token budget.
+
+## Advanced commands
 
 ```text
 cm init [--file cm] [--empty]

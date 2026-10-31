@@ -234,6 +234,46 @@ fn run() -> Result<()> {
                 arg_value(&args, "--json").ok_or_else(|| anyhow!("append requires --json"))?;
             cmd_append(&arg_path(&args), &input, has_flag(&args, "--durable"))
         }
+        "remember" => {
+            let subject = arg_value(&args, "--subject")
+                .ok_or_else(|| anyhow!("remember requires --subject"))?;
+            let text =
+                arg_value(&args, "--text").ok_or_else(|| anyhow!("remember requires --text"))?;
+            let input = AppendInput {
+                kind: arg_value(&args, "--kind").unwrap_or_else(|| "fact".to_string()),
+                scope: arg_value(&args, "--scope").unwrap_or_else(|| "repo".to_string()),
+                subject,
+                text,
+                source: arg_value(&args, "--source").unwrap_or_else(|| "agent".to_string()),
+                confidence: arg_f64(&args, "--confidence", 0.9),
+                valid_from: 0,
+                valid_to: None,
+                supersedes: arg_value(&args, "--supersedes")
+                    .map(|value| parse_ids(&value))
+                    .unwrap_or_default(),
+                conflict_of: None,
+                trust: arg_value(&args, "--trust"),
+                source_commit: arg_value(&args, "--source-commit"),
+            };
+            cmd_append_input(&arg_path(&args), &input, has_flag(&args, "--durable"))
+        }
+        "recall" => {
+            let query =
+                arg_value(&args, "--query").ok_or_else(|| anyhow!("recall requires --query"))?;
+            cmd_context(
+                &arg_path(&args),
+                &query,
+                arg_usize(&args, "--budget", 800),
+                arg_usize(&args, "--top", 16),
+                arg_value(&args, "--scope"),
+                arg_value(&args, "--kind"),
+                Some(arg_value(&args, "--min-trust").unwrap_or_else(|| "authored".to_string())),
+                arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
+                arg_usize(&args, "--max-items", 3),
+                arg_f64(&args, "--min-score", 0.0),
+            )
+        }
+        "status" => cmd_verify(&arg_path(&args), false),
         "import" => cmd_import(&arg_path(&args)),
         "export" => cmd_export(
             &arg_path(&args),
@@ -281,6 +321,8 @@ fn run() -> Result<()> {
                 arg_value(&args, "--kind"),
                 arg_value(&args, "--min-trust"),
                 arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
+                arg_usize(&args, "--max-items", 5),
+                arg_f64(&args, "--min-score", 0.0),
             )
         }
         "similar" => {
@@ -326,25 +368,15 @@ fn run() -> Result<()> {
 
 fn print_usage() {
     println!(
-        "cm 1.0.0 - single-file compressed mmap memory\n\
-         \n\
-         cm init [--file cm] [--empty]\n\
-         cm append --file cm --json '<json>' [--durable]\n\
-         cm import --file cm < records.jsonl\n\
-         cm export --file cm [--format cmx|jsonl]\n\
-         cm reindex [--file cm]\n\
-         cm skill [--json] [--install] [--check] [--dir <path>]\n\
-         cm get --file cm --id <id>\n\
-         cm scan [--file cm] [--limit 100] [--offset 0]\n\
-         cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]\n\
-         cm context --file cm --query <text> [--budget 2000] [--top 32] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]\n\
-         cm similar --file cm --id <id> [--top 16] [--scope <scope>]\n\
-         cm merge --file cm --sources <id1,id2> [--text <text>]\n\
-         cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]\n\
-         cm forget --file cm --id <id>\n\
-         cm purge --file cm\n\
-         cm conflicts --file cm\n\
-         cm verify --file cm [--full]"
+        "cm 1.0.0 - compact memory for AI agents
+         
+         cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored]
+         cm recall --file cm --query <text> [--scope <scope>] [--budget 800]
+         cm forget --file cm --id <id>
+         cm status [--file cm]
+         cm skill [--json] [--install] [--check]
+         
+         Internal/advanced commands: see README."
     );
 }
 
@@ -423,9 +455,13 @@ fn cmd_init(path: &Path, empty: bool) -> Result<()> {
 
 fn cmd_append(path: &Path, input_json: &str, durable: bool) -> Result<()> {
     let input: AppendInput = serde_json::from_str(input_json).context("parse --json input")?;
-    validate_input(&input)?;
+    cmd_append_input(path, &input, durable)
+}
+
+fn cmd_append_input(path: &Path, input: &AppendInput, durable: bool) -> Result<()> {
+    validate_input(input)?;
     read_header_file(path)?;
-    let memory = memory_from_input(&input)?;
+    let memory = memory_from_input(input)?;
     append_record(path, 2, &memory_payload(&memory), durable)?;
     outln!("{}", json!({"ok": true, "id": memory.id}));
     Ok(())
@@ -697,6 +733,8 @@ fn cmd_context(
     kind: Option<String>,
     min_trust: Option<String>,
     format: String,
+    max_items: usize,
+    min_score: f64,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
@@ -746,10 +784,10 @@ fn cmd_context(
     }
     let mut candidates: Vec<(f64, crate::model::Memory)> = hits
         .into_values()
-        .filter(|(_, memory)| {
+        .filter(|(score, memory)| {
             let not_expired = memory.valid_to.is_none_or(|end| end > now);
             let trust_ok = trust_rank(&memory.trust) >= min_rank;
-            not_expired && trust_ok
+            *score >= min_score && not_expired && trust_ok
         })
         .collect();
     candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -757,6 +795,9 @@ fn cmd_context(
     let mut selected = Vec::new();
     let mut estimated = 0usize;
     for (_, memory) in candidates {
+        if selected.len() >= max_items {
+            break;
+        }
         let line = cmx_line(&memory);
         let line_tokens = line.chars().count().div_ceil(4);
         if estimated + line_tokens > budget && !selected.is_empty() {
