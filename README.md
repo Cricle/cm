@@ -91,7 +91,7 @@ without recompressing data blocks. They do **not** compact dead blocks; use
 - `checkpoint --in-place` only appends dirty index pages and a new page table,
   then flips a dual header slot. Measured: 10k ~9ms, 1M ~0.13s.
 - In-place growth is proportional to dirty pages, not the whole index: 10k
-  ~16KB per generation; 1M ~75KB per generation (one dirty 64KiB page + 68KB
+  ~16KB per generation; 1M ~47KB per generation (one dirty 64KiB page + 39KB
   page table). Periodic `cm reindex` reclaims old pages.
 - Old single-header and single-blob indexes migrate on their first checkpoint;
   subsequent checkpoints use page-level COW.
@@ -161,7 +161,7 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 `checkpoint` (cold process, 1M records) measured ~1.2s; 10k ~20ms.
 `checkpoint --in-place` measured ~0.13s / 1M and ~9ms / 10k, adding only one
 dirty index page plus the page table per changeset. A full `reindex` of the
-same 1M store is still minutes. Numbers are workload-dependent; use `cm verify`
+same 1M store is roughly 10-20s. Numbers are workload-dependent; use `cm verify`
 after bulk changes.
 
 ## Development
