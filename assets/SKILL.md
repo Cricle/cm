@@ -1,6 +1,6 @@
 ---
 name: cm-memory
-description: Use when a project contains a `cm` memory file, or when the user asks to remember/recall project facts, decisions, constraints, prior work, or agent handoffs. Guides concise recall and write-back through the cm binary memory CLI; never use Markdown as the memory store.
+description: Use when a coding project contains a `cm` memory file, or when the user asks to remember/recall source-grounded project facts, decisions, constraints, interfaces, procedures, or prior work. Guides concise recall and write-back through the cm binary memory CLI; never use Markdown as the memory store.
 ---
 
 # cm memory

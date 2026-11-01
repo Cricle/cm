@@ -3,11 +3,15 @@
 [![CI](https://github.com/Cricle/cm/actions/workflows/ci.yml/badge.svg)](https://github.com/Cricle/cm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`cm` is a single-file, compressed, mmap-backed memory store for AI agents.
-It is not Markdown and not a database server: one file holds an append-only
-data log, a compressed BM25/MinHash index, and an optional disposable `cm.lru`
-cache. Writers coordinate through a disposable `cm.lock`; it contains no memory
-data.
+`cm` is a single-file, compressed, mmap-backed **project memory for coding
+agents**. It is a hot-discovery index for source-grounded project knowledge,
+not a universal knowledge base.
+
+One file holds an append-only data log, a compressed BM25/MinHash index, and an
+optional disposable `cm.lru` cache. It is not Markdown and not a database
+server. Writers coordinate through a disposable `cm.lock`; it contains no
+memory data. See [positioning](docs/positioning.md) for the target scope and
+non-goals.
 
 ## Install
 

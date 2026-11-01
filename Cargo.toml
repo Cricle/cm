@@ -2,7 +2,7 @@
 name = "cm-memory"
 version = "1.0.0"
 edition = "2021"
-description = "Single-file compressed memory store for AI agents"
+description = "Single-file compressed project memory for coding agents"
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/cm-memory"
