@@ -86,13 +86,15 @@ Both modes apply tail tombstones/merges/supersedes to the index active bitset
 without recompressing data blocks. They do **not** compact dead blocks; use
 `cm reindex` for full compaction and space reclamation.
 
-- `checkpoint` copies immutable compressed blocks into a new file and resets the
-  index generation. It is space-stable: 10k ~28ms, 1M ~1.12s.
-- `checkpoint --in-place` appends a new index generation and flips a dual header
-  slot. It is faster: 10k ~17ms, 1M ~0.8s. The file grows by the compressed
-  index per generation (10k ~334KB, 1M ~43MB) until `cm reindex` compacts it.
-- Old single-header files migrate once on their first checkpoint; subsequent
-  checkpoints can use in-place generations.
+- The index is stored as 64 KiB pages plus a page table. `checkpoint` copies
+  immutable blocks and writes a fresh page index: 10k ~20ms, 1M ~1.2s.
+- `checkpoint --in-place` only appends dirty index pages and a new page table,
+  then flips a dual header slot. Measured: 10k ~9ms, 1M ~0.13s.
+- In-place growth is proportional to dirty pages, not the whole index: 10k
+  ~16KB per generation; 1M ~75KB per generation (one dirty 64KiB page + 68KB
+  page table). Periodic `cm reindex` reclaims old pages.
+- Old single-header and single-blob indexes migrate on their first checkpoint;
+  subsequent checkpoints use page-level COW.
 - `cm.lock` is an advisory writer lock; readers remain lock-free.
 
 ## Agent skill
@@ -126,7 +128,7 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 - Single memory file `cm`; optional disposable `cm.lru` cache and `cm.lock` writer lock.
 - Append-only data log with 64 KiB compressed blocks.
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
-- `cm checkpoint` reuses immutable compressed blocks; `--in-place` keeps old index generations and commits via dual headers.
+- `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded LFU/LRU block cache.
@@ -143,11 +145,11 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 | `append` | ~8 ms |
 | `search --top 8` | ~12 ms |
 
-`checkpoint` (cold process, 1M records) measured p50 ~1.12s / p95 ~1.13s; 10k
-records measured p50 ~28ms / p95 ~29ms. `checkpoint --in-place` measured p50
-~0.78s / 1M and ~17ms / 10k, at the cost of one compressed index generation per
-changeset. A full `reindex` of the same 1M store is roughly 3m19s. Numbers are
-workload-dependent; use `cm verify` after bulk changes.
+`checkpoint` (cold process, 1M records) measured ~1.2s; 10k ~20ms.
+`checkpoint --in-place` measured ~0.13s / 1M and ~9ms / 10k, adding only one
+dirty index page plus the page table per changeset. A full `reindex` of the
+same 1M store is still minutes. Numbers are workload-dependent; use `cm verify`
+after bulk changes.
 
 ## Development
 

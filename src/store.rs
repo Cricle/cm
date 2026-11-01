@@ -15,6 +15,11 @@ pub(crate) const HEADER_LEN: usize = 128;
 const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
 const HEADER_SLOT: usize = HEADER_LEN;
 const HEADER_FLAG_DUAL: u32 = 1;
+const HEADER_FLAG_PAGE_INDEX: u32 = 2;
+const PAGE_SIZE: usize = 64 * 1024;
+const PAGE_MAGIC: &[u8; 8] = b"CMPG1\0\0\0";
+const PAGE_ENTRY: usize = 24;
+const PAGE_TABLE_HEADER: usize = 24;
 const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
 const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
@@ -84,6 +89,173 @@ struct Block {
     hash: u64,
 }
 
+#[derive(Clone)]
+struct PageChunk {
+    comp: Vec<u8>,
+    raw_len: u32,
+    hash: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PageEntry {
+    offset: u64,
+    comp_len: u32,
+    raw_len: u32,
+    hash: u64,
+}
+
+fn build_page_chunks(raw: &[u8]) -> Result<Vec<PageChunk>> {
+    let mut chunks = Vec::with_capacity(raw.len().div_ceil(PAGE_SIZE));
+    for chunk in raw.chunks(PAGE_SIZE) {
+        let comp = zstd::bulk::compress(chunk, ZSTD_LEVEL)?;
+        chunks.push(PageChunk {
+            comp,
+            raw_len: chunk.len() as u32,
+            hash: xxh3_64(chunk),
+        });
+    }
+    Ok(chunks)
+}
+
+fn encode_page_table(entries: &[PageEntry], page_size: usize, raw_len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PAGE_TABLE_HEADER + entries.len() * PAGE_ENTRY + 8);
+    out.extend_from_slice(PAGE_MAGIC);
+    out.extend_from_slice(&(page_size as u32).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(raw_len as u64).to_le_bytes());
+    for entry in entries {
+        out.extend_from_slice(&entry.offset.to_le_bytes());
+        out.extend_from_slice(&entry.comp_len.to_le_bytes());
+        out.extend_from_slice(&entry.raw_len.to_le_bytes());
+        out.extend_from_slice(&entry.hash.to_le_bytes());
+    }
+    let checksum = xxh3_64(&out);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    out
+}
+
+fn parse_page_table(data: &[u8], header: &Header) -> Result<Vec<PageEntry>> {
+    if data.len() < PAGE_TABLE_HEADER + 8 || &data[..8] != PAGE_MAGIC {
+        bail!("bad page index table");
+    }
+    let page_size = read_u32(data, 8) as usize;
+    let count = read_u32(data, 12) as usize;
+    let raw_len = read_u64(data, 16) as usize;
+    if page_size != PAGE_SIZE || raw_len != header.index_raw_len as usize {
+        bail!("page index table header mismatch");
+    }
+    let expected = PAGE_TABLE_HEADER
+        .checked_add(
+            count
+                .checked_mul(PAGE_ENTRY)
+                .context("page table size overflow")?,
+        )
+        .and_then(|value| value.checked_add(8))
+        .context("page table size overflow")?;
+    if expected != data.len() {
+        bail!("page index table length mismatch");
+    }
+    let stored = read_u64(data, expected - 8);
+    if xxh3_64(&data[..expected - 8]) != stored {
+        bail!("page index table checksum mismatch");
+    }
+    let mut entries = Vec::with_capacity(count);
+    let mut total = 0usize;
+    for i in 0..count {
+        let offset = PAGE_TABLE_HEADER + i * PAGE_ENTRY;
+        let entry = PageEntry {
+            offset: read_u64(data, offset),
+            comp_len: read_u32(data, offset + 8),
+            raw_len: read_u32(data, offset + 12),
+            hash: read_u64(data, offset + 16),
+        };
+        if entry.raw_len == 0 || entry.raw_len as usize > PAGE_SIZE {
+            bail!("bad page raw length");
+        }
+        total = total
+            .checked_add(entry.raw_len as usize)
+            .context("page raw length overflow")?;
+        entries.push(entry);
+    }
+    if total != raw_len {
+        bail!("page raw length total mismatch");
+    }
+    Ok(entries)
+}
+
+fn read_index_pages(mmap: &[u8], header: &Header) -> Result<Vec<u8>> {
+    let start = header.index_off as usize;
+    let end = start
+        .checked_add(header.index_len as usize)
+        .context("page table offset overflow")?;
+    if end > mmap.len() {
+        bail!("page table out of bounds");
+    }
+    let entries = parse_page_table(&mmap[start..end], header)?;
+    let mut raw = Vec::with_capacity(header.index_raw_len as usize);
+    for entry in entries {
+        let page_start = entry.offset as usize;
+        let page_end = page_start
+            .checked_add(entry.comp_len as usize)
+            .context("page offset overflow")?;
+        if page_end > mmap.len() {
+            bail!("page out of bounds");
+        }
+        let page = zstd::bulk::decompress(&mmap[page_start..page_end], entry.raw_len as usize)
+            .context("decompress index page")?;
+        if page.len() != entry.raw_len as usize || xxh3_64(&page) != entry.hash {
+            bail!("index page checksum mismatch");
+        }
+        raw.extend_from_slice(&page);
+    }
+    if raw.len() != header.index_raw_len as usize || xxh3_64(&raw) != header.index_hash {
+        bail!("index hash mismatch");
+    }
+    Ok(raw)
+}
+
+fn read_index_raw(mmap: &[u8], header: &Header) -> Result<Vec<u8>> {
+    if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
+        return read_index_pages(mmap, header);
+    }
+    let start = header.index_off as usize;
+    let end = start
+        .checked_add(header.index_len as usize)
+        .context("index offset overflow")?;
+    if end > mmap.len() {
+        bail!("index out of bounds");
+    }
+    let raw = zstd::bulk::decompress(&mmap[start..end], header.index_raw_len as usize)
+        .context("decompress index")?;
+    if raw.len() != header.index_raw_len as usize || xxh3_64(&raw) != header.index_hash {
+        bail!("index hash mismatch");
+    }
+    Ok(raw)
+}
+
+#[allow(clippy::type_complexity)]
+fn page_layout(
+    raw: &[u8],
+    page_start: usize,
+) -> Result<(Vec<PageChunk>, Vec<PageEntry>, usize, Vec<u8>)> {
+    let chunks = build_page_chunks(raw)?;
+    let mut entries = Vec::with_capacity(chunks.len());
+    let mut cursor = page_start;
+    for chunk in &chunks {
+        entries.push(PageEntry {
+            offset: cursor as u64,
+            comp_len: chunk.comp.len() as u32,
+            raw_len: chunk.raw_len,
+            hash: chunk.hash,
+        });
+        cursor = cursor
+            .checked_add(chunk.comp.len())
+            .context("page offset overflow")?;
+    }
+    let table = encode_page_table(&entries, PAGE_SIZE, raw.len());
+    Ok((chunks, entries, cursor, table))
+}
+
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -92,23 +264,11 @@ impl Store {
         if header.index_len == 0 {
             bail!("no index; run cm reindex");
         }
-        let index_start = header.index_off as usize;
-        let index_end = index_start + header.index_len as usize;
-        if index_end > mmap.len() {
-            bail!("index out of bounds");
-        }
         let cache =
             match Cache::open_existing(path, header.index_hash, header.index_raw_len as usize) {
                 Some(cache) => cache,
                 None => {
-                    let index_raw = zstd::bulk::decompress(
-                        &mmap[index_start..index_end],
-                        header.index_raw_len as usize,
-                    )
-                    .context("decompress index")?;
-                    if xxh3_64(&index_raw) != header.index_hash {
-                        bail!("index hash mismatch");
-                    }
+                    let index_raw = read_index_raw(&mmap, &header)?;
                     match Cache::create(path, header.index_hash, &index_raw) {
                         Ok(cache) => cache,
                         // The cache is disposable: a read must still work when
@@ -950,21 +1110,7 @@ pub(crate) fn verify_full(path: &Path) -> Result<u64> {
     let mmap = unsafe { Mmap::map(&file)? };
     let header = read_current_header(&mmap)?;
     if header.index_len > 0 {
-        let index_start = header.index_off as usize;
-        let index_end = index_start
-            .checked_add(header.index_len as usize)
-            .context("index length overflow")?;
-        if index_end > mmap.len() {
-            bail!("index out of bounds");
-        }
-        let index_raw =
-            zstd::bulk::decompress(&mmap[index_start..index_end], header.index_raw_len as usize)
-                .context("decompress index")?;
-        if index_raw.len() != header.index_raw_len as usize
-            || xxh3_64(&index_raw) != header.index_hash
-        {
-            bail!("index hash mismatch");
-        }
+        let _ = read_index_raw(&mmap, &header)?;
     }
     let mut count = 0u64;
     for block_id in 0..header.block_count as u32 {
@@ -984,12 +1130,12 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     let records = read_all_records(&mmap, &old_header)?;
     let active = active_docs(&records)?;
     let (index_raw, blocks, doc_count) = build_index(active)?;
-    let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
     let index_hash = xxh3_64(&index_raw);
     let block_count = blocks.len();
     let block_table_off = DUAL_HEADER_LEN;
-    let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
-    let data_start = index_off + index_comp.len();
+    let page_start = align8(block_table_off + block_count * BLOCK_ENTRY);
+    let (pages, _entries, index_off, page_table) = page_layout(&index_raw, page_start)?;
+    let data_start = index_off + page_table.len();
     let mut block_offsets = Vec::with_capacity(block_count);
     let mut cursor = data_start;
     for block in &blocks {
@@ -1001,14 +1147,14 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
         block_table_off: block_table_off as u64,
         block_count: block_count as u64,
         index_off: index_off as u64,
-        index_len: index_comp.len() as u64,
+        index_len: page_table.len() as u64,
         index_raw_len: index_raw.len() as u64,
         index_hash,
         data_start: data_start as u64,
         tail_start: cursor as u64,
         doc_count: doc_count as u64,
         generation: 1,
-        flags: HEADER_FLAG_DUAL,
+        flags: HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX,
     };
     let tmp = temp_path(path);
     if tmp.exists() {
@@ -1025,7 +1171,10 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
         write_u64(&mut entry, 16, block.hash);
         out.write_all(&entry)?;
     }
-    out.write_all(&index_comp)?;
+    for page in &pages {
+        out.write_all(&page.comp)?;
+    }
+    out.write_all(&page_table)?;
     for block in &blocks {
         out.write_all(&(block.comp.len() as u32).to_le_bytes())?;
         out.write_all(&block.raw_len.to_le_bytes())?;
@@ -1078,7 +1227,6 @@ fn migrate_checkpoint(
     old_header: Header,
     index_raw: Vec<u8>,
 ) -> Result<Header> {
-    let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
     let index_hash = xxh3_64(&index_raw);
 
     struct OldBlock {
@@ -1119,8 +1267,9 @@ fn migrate_checkpoint(
     }
 
     let block_table_off = DUAL_HEADER_LEN;
-    let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
-    let data_start = index_off + index_comp.len();
+    let page_start = align8(block_table_off + block_count * BLOCK_ENTRY);
+    let (pages, _entries, index_off, page_table) = page_layout(&index_raw, page_start)?;
+    let data_start = index_off + page_table.len();
     let mut block_offsets = Vec::with_capacity(block_count);
     let mut cursor = data_start;
     for block in &old_blocks {
@@ -1132,14 +1281,14 @@ fn migrate_checkpoint(
         block_table_off: block_table_off as u64,
         block_count: block_count as u64,
         index_off: index_off as u64,
-        index_len: index_comp.len() as u64,
+        index_len: page_table.len() as u64,
         index_raw_len: index_raw.len() as u64,
         index_hash,
         data_start: data_start as u64,
         tail_start: cursor as u64,
         doc_count: old_header.doc_count,
         generation: 1,
-        flags: HEADER_FLAG_DUAL,
+        flags: HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX,
     };
     let tmp = temp_path(path);
     if tmp.exists() {
@@ -1156,7 +1305,10 @@ fn migrate_checkpoint(
         write_u64(&mut entry, 16, read_u64(&store.mmap, block.offset + 8));
         out.write_all(&entry)?;
     }
-    out.write_all(&index_comp)?;
+    for page in &pages {
+        out.write_all(&page.comp)?;
+    }
+    out.write_all(&page_table)?;
     for block in &old_blocks {
         out.write_all(&store.mmap[block.offset..block.offset + 16 + block.comp_len])?;
     }
@@ -1207,28 +1359,71 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
     if !changed {
         return Ok(current);
     }
+    if current.flags & HEADER_FLAG_PAGE_INDEX == 0 {
+        return migrate_checkpoint(path, &store, current, index_raw);
+    }
 
-    let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
+    let table_start = current.index_off as usize;
+    let table_end = table_start
+        .checked_add(current.index_len as usize)
+        .context("page table offset overflow")?;
+    if table_end > store.mmap.len() {
+        bail!("page table out of bounds");
+    }
+    let old_entries = parse_page_table(&store.mmap[table_start..table_end], &current)?;
+    let page_count = index_raw.len().div_ceil(PAGE_SIZE);
+    if old_entries.len() != page_count {
+        return migrate_checkpoint(path, &store, current, index_raw);
+    }
     let index_hash = xxh3_64(&index_raw);
-    let index_off = store
-        .mmap
-        .len()
+    let marker_offset = store.mmap.len();
+    let mut cursor = marker_offset
         .checked_add(INDEX_MARKER_LEN)
-        .context("index offset overflow")?;
+        .context("page marker offset overflow")?;
+    let mut dirty = Vec::new();
+    let mut entries = Vec::with_capacity(page_count);
+    for (i, raw_page) in index_raw.chunks(PAGE_SIZE).enumerate() {
+        let old = old_entries[i];
+        let hash = xxh3_64(raw_page);
+        if old.raw_len == raw_page.len() as u32 && old.hash == hash {
+            entries.push(old);
+            continue;
+        }
+        let comp = zstd::bulk::compress(raw_page, ZSTD_LEVEL)?;
+        entries.push(PageEntry {
+            offset: cursor as u64,
+            comp_len: comp.len() as u32,
+            raw_len: raw_page.len() as u32,
+            hash,
+        });
+        cursor = cursor
+            .checked_add(comp.len())
+            .context("page offset overflow")?;
+        dirty.push(comp);
+    }
+    let page_table = encode_page_table(&entries, PAGE_SIZE, index_raw.len());
+    let index_off = cursor;
+    let payload_len = index_off
+        .checked_sub(marker_offset + INDEX_MARKER_LEN)
+        .and_then(|value| value.checked_add(page_table.len()))
+        .context("page generation length overflow")?;
     let mut out = OpenOptions::new().append(true).open(path)?;
     out.write_all(INDEX_MARKER)?;
-    out.write_all(&(index_comp.len() as u64).to_le_bytes())?;
-    out.write_all(&index_comp)?;
+    out.write_all(&(payload_len as u64).to_le_bytes())?;
+    for comp in &dirty {
+        out.write_all(comp)?;
+    }
+    out.write_all(&page_table)?;
     out.sync_all()?;
     drop(out);
 
     let mut next = current;
     next.index_off = index_off as u64;
-    next.index_len = index_comp.len() as u64;
+    next.index_len = page_table.len() as u64;
     next.index_raw_len = index_raw.len() as u64;
     next.index_hash = index_hash;
     next.generation = current.generation.saturating_add(1);
-    next.flags |= HEADER_FLAG_DUAL;
+    next.flags |= HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX;
 
     let other = if slot == 0 { HEADER_SLOT } else { 0 };
     let mut header_file = OpenOptions::new().write(true).open(path)?;
