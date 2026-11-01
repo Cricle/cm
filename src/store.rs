@@ -9,7 +9,9 @@ use memmap2::Mmap;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::cache::Cache;
-use crate::model::{decode_fields, decode_memory, get_text, kind_id, now_ms, tokenize, Memory};
+use crate::model::{
+    decode_fields, decode_memory, get_text, kind_id, memory_payload, now_ms, tokenize, Memory,
+};
 
 pub(crate) const HEADER_LEN: usize = 128;
 const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
@@ -25,6 +27,8 @@ const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
 pub(crate) const DOC_SIZE: usize = 32;
 pub(crate) const HASH_SLOT: usize = 16;
+const HASH_SLOT8: usize = 8;
+const INDEX_VERSION_HASH8: u8 = 2;
 pub(crate) const INDEX_HEADER: usize = 128;
 const MAGIC: &[u8; 4] = b"CM1\0";
 const VERSION: u8 = 1;
@@ -349,18 +353,29 @@ impl Store {
             let ib = self.index();
             (read_u32(ib, 20), read_u64(ib, 32) as usize)
         };
+        let hash8 = self.index()[4] >= INDEX_VERSION_HASH8;
         let hash = xxh3_64(id.as_bytes());
+        let hash_slot = if hash8 { HASH_SLOT8 } else { HASH_SLOT };
         let mut slot = (hash as usize) & (hash_cap as usize - 1);
         for _ in 0..hash_cap {
             let (entry_hash, doc_idx) = {
                 let ib = self.index();
-                let offset = hash_off + slot * HASH_SLOT;
-                (read_u64(ib, offset), read_u32(ib, offset + 8))
+                let offset = hash_off + slot * hash_slot;
+                if hash8 {
+                    (read_u32(ib, offset) as u64, read_u32(ib, offset + 4))
+                } else {
+                    (read_u64(ib, offset), read_u32(ib, offset + 8))
+                }
             };
             if doc_idx == u32::MAX {
                 return Ok(None);
             }
-            if entry_hash == hash {
+            let hash_matches = if hash8 {
+                entry_hash == (hash & u32::MAX as u64)
+            } else {
+                entry_hash == hash
+            };
+            if hash_matches {
                 let meta = self.doc_meta(doc_idx)?;
                 if self.is_active(doc_idx)? {
                     let memory = self.doc_memory(&meta)?;
@@ -1133,7 +1148,7 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     let created_at = old_header.created_at;
     let records = read_all_records(&mmap, &old_header)?;
     let active = active_docs(&records)?;
-    let (index_raw, blocks, doc_count) = build_index(active)?;
+    let (index_raw, blocks, doc_count) = build_index(active, true)?;
     let index_hash = xxh3_64(&index_raw);
     let block_count = blocks.len();
     let block_table_off = DUAL_HEADER_LEN;
@@ -1444,12 +1459,21 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
     Ok(next)
 }
 
-fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)> {
+fn build_index(active: Vec<ActiveDoc<'_>>, reencode: bool) -> Result<(Vec<u8>, Vec<Block>, u32)> {
     let mut blocks = Vec::new();
     let mut current = Vec::new();
     let mut docs = Vec::with_capacity(active.len());
     for doc in active {
-        let raw = &doc.record.raw;
+        let encoded = if reencode {
+            Some(encode_record(
+                doc.record.rec_type,
+                0,
+                &memory_payload(&doc.memory),
+            )?)
+        } else {
+            None
+        };
+        let raw = encoded.as_deref().unwrap_or(&doc.record.raw);
         let created_at = doc.memory.created_at;
         if !current.is_empty() && current.len() + raw.len() > BLOCK_RAW {
             let block = seal_block(&current)?;
@@ -1547,9 +1571,10 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
 
     let n = docs.len();
     let hash_cap = (n * 2).max(1024).next_power_of_two();
+    let hash_slot = HASH_SLOT8;
     let docs_off = INDEX_HEADER;
     let hash_off = align8(docs_off + DOC_SIZE * n);
-    let active_off = align8(hash_off + HASH_SLOT * hash_cap);
+    let active_off = align8(hash_off + hash_slot * hash_cap);
     let active_len = n.div_ceil(8);
     let scopes_off = align8(active_off + active_len);
     let token_offsets_off = align8(scopes_off + scope_data.len());
@@ -1564,7 +1589,7 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
 
     let mut index = vec![0u8; index_len];
     write_u32(&mut index, 0, 0x31584449);
-    index[4] = 1;
+    index[4] = INDEX_VERSION_HASH8;
     index[6..8].copy_from_slice(&(INDEX_HEADER as u16).to_le_bytes());
     write_u32(&mut index, 8, n as u32);
     write_u32(&mut index, 12, scopes.len() as u32);
@@ -1592,15 +1617,16 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
         index[offset + 29] = if doc.memory.merged { 1 } else { 0 };
     }
 
-    let mut hash_table = vec![0xFFu8; HASH_SLOT * hash_cap];
+    let mut hash_table = vec![0xFFu8; hash_slot * hash_cap];
     for (i, doc) in docs.iter().enumerate() {
         let hash = xxh3_64(doc.memory.id.as_bytes());
         let mut slot = (hash as usize) & (hash_cap - 1);
         loop {
-            let doc_idx = read_u32(&hash_table, slot * HASH_SLOT + 8);
+            let entry = slot * hash_slot;
+            let doc_idx = read_u32(&hash_table, entry + 4);
             if doc_idx == u32::MAX {
-                write_u64(&mut hash_table, slot * HASH_SLOT, hash);
-                write_u32(&mut hash_table, slot * HASH_SLOT + 8, i as u32);
+                write_u32(&mut hash_table, entry, hash as u32);
+                write_u32(&mut hash_table, entry + 4, i as u32);
                 break;
             }
             slot = (slot + 1) & (hash_cap - 1);

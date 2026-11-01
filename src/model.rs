@@ -3,7 +3,7 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64_with_seed};
 
 pub(crate) const KINDS: &[&str] = &[
@@ -104,39 +104,212 @@ pub(crate) fn build_merged(
     memory
 }
 
+const COMPACT_MARKER: u8 = 0xF1;
+
+fn put_varint(out: &mut Vec<u8>, mut value: usize) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn take_varint(data: &[u8], cursor: &mut usize) -> Result<usize> {
+    let mut value = 0usize;
+    let mut shift = 0u32;
+    loop {
+        let byte = *data
+            .get(*cursor)
+            .ok_or_else(|| anyhow!("truncated varint"))?;
+        *cursor += 1;
+        value |= ((byte & 0x7F) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= usize::BITS {
+            bail!("varint overflow");
+        }
+    }
+}
+
+fn compact_field(id: u8, mask: &mut u32, out: &mut Vec<u8>, value: &[u8]) {
+    *mask |= 1u32 << (id - 1);
+    out.extend_from_slice(value);
+}
+
+fn compact_text(id: u8, mask: &mut u32, out: &mut Vec<u8>, value: &str) {
+    let mut field = Vec::with_capacity(value.len() + 3);
+    put_varint(&mut field, value.len());
+    field.extend_from_slice(value.as_bytes());
+    compact_field(id, mask, out, &field);
+}
+
+fn compact_u64(id: u8, mask: &mut u32, out: &mut Vec<u8>, value: u64) {
+    let mut field = Vec::with_capacity(10);
+    put_varint(&mut field, value as usize);
+    compact_field(id, mask, out, &field);
+}
+
+fn compact_f64(id: u8, mask: &mut u32, out: &mut Vec<u8>, value: f64) {
+    compact_field(id, mask, out, &value.to_le_bytes());
+}
+
+fn compact_texts<S: AsRef<str>>(id: u8, mask: &mut u32, out: &mut Vec<u8>, values: &[S]) {
+    let mut field = Vec::new();
+    put_varint(&mut field, values.len());
+    for value in values {
+        let value = value.as_ref();
+        put_varint(&mut field, value.len());
+        field.extend_from_slice(value.as_bytes());
+    }
+    compact_field(id, mask, out, &field);
+}
+
+/// Schema-aware compact payload. Field order is fixed by schema `0xF1`;
+/// a 17-bit presence map removes per-field IDs/types, and defaults are omitted.
 pub(crate) fn memory_payload(memory: &Memory) -> Vec<u8> {
-    let mut payload = Vec::new();
-    put_text(&mut payload, 1, &memory.id);
-    put_text(&mut payload, 2, &memory.kind);
-    put_text(&mut payload, 3, &memory.scope);
-    put_text(&mut payload, 4, &memory.subject);
-    put_text(&mut payload, 5, &memory.text);
-    put_text(&mut payload, 6, &memory.source);
-    put_f64(&mut payload, 7, memory.confidence);
-    put_texts(&mut payload, 8, &memory.sources);
-    put_u64(&mut payload, 9, memory.created_at);
+    let mut mask = 0u32;
+    let mut body = Vec::new();
+    compact_text(1, &mut mask, &mut body, &memory.id);
+    compact_text(2, &mut mask, &mut body, &memory.kind);
+    compact_text(3, &mut mask, &mut body, &memory.scope);
+    compact_text(4, &mut mask, &mut body, &memory.subject);
+    compact_text(5, &mut mask, &mut body, &memory.text);
+    if !memory.source.is_empty() {
+        compact_text(6, &mut mask, &mut body, &memory.source);
+    }
+    if memory.confidence != 0.9 {
+        compact_f64(7, &mut mask, &mut body, memory.confidence);
+    }
+    if !memory.sources.is_empty() {
+        compact_texts(8, &mut mask, &mut body, &memory.sources);
+    }
+    compact_u64(9, &mut mask, &mut body, memory.created_at);
     if let Some(strategy) = &memory.strategy {
-        put_text(&mut payload, 10, strategy);
+        compact_text(10, &mut mask, &mut body, strategy);
     }
     if let Some(score) = memory.score {
-        put_f64(&mut payload, 11, score);
+        compact_f64(11, &mut mask, &mut body, score);
     }
-    put_u64(&mut payload, 12, memory.valid_from);
+    if memory.valid_from != memory.created_at {
+        compact_u64(12, &mut mask, &mut body, memory.valid_from);
+    }
     if let Some(valid_to) = memory.valid_to {
-        put_u64(&mut payload, 13, valid_to);
+        compact_u64(13, &mut mask, &mut body, valid_to);
     }
-    put_texts(&mut payload, 14, &memory.supersedes);
+    if !memory.supersedes.is_empty() {
+        compact_texts(14, &mut mask, &mut body, &memory.supersedes);
+    }
     if let Some(conflict_of) = &memory.conflict_of {
-        put_text(&mut payload, 15, conflict_of);
+        compact_text(15, &mut mask, &mut body, conflict_of);
     }
-    put_text(&mut payload, 16, &memory.trust);
+    if memory.trust != "authored" {
+        compact_text(16, &mut mask, &mut body, &memory.trust);
+    }
     if let Some(source_commit) = &memory.source_commit {
-        put_text(&mut payload, 17, source_commit);
+        compact_text(17, &mut mask, &mut body, source_commit);
     }
-    payload
+    let mut out = Vec::with_capacity(5 + body.len());
+    out.push(COMPACT_MARKER);
+    out.extend_from_slice(&mask.to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+fn take_compact_text(data: &[u8], cursor: &mut usize) -> Result<String> {
+    let len = take_varint(data, cursor)?;
+    let end = cursor
+        .checked_add(len)
+        .context("compact text length overflow")?;
+    if end > data.len() {
+        bail!("truncated compact text");
+    }
+    let value = String::from_utf8(data[*cursor..end].to_vec())?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn take_compact_u64(data: &[u8], cursor: &mut usize) -> Result<u64> {
+    Ok(take_varint(data, cursor)? as u64)
+}
+
+fn take_compact_texts(data: &[u8], cursor: &mut usize) -> Result<Vec<String>> {
+    let count = take_varint(data, cursor)?;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(take_compact_text(data, cursor)?);
+    }
+    Ok(values)
+}
+
+fn decode_compact_memory(payload: &[u8]) -> Result<Memory> {
+    if payload.len() < 5 || payload[0] != COMPACT_MARKER {
+        bail!("bad compact memory payload");
+    }
+    let mask = u32::from_le_bytes(payload[1..5].try_into().unwrap());
+    let mut cursor = 5usize;
+    let mut fields: HashMap<u8, Field> = HashMap::new();
+    for id in 1..=17u8 {
+        if mask & (1u32 << (id - 1)) == 0 {
+            continue;
+        }
+        let field = match id {
+            7 | 11 => {
+                if payload.len() - cursor < 8 {
+                    bail!("truncated compact f64");
+                }
+                let value = f64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
+                cursor += 8;
+                Field::F64(value)
+            }
+            8 | 14 => Field::Texts(take_compact_texts(payload, &mut cursor)?),
+            9 | 12 | 13 => Field::U64(take_compact_u64(payload, &mut cursor)?),
+            _ => Field::Text(take_compact_text(payload, &mut cursor)?),
+        };
+        fields.insert(id, field);
+    }
+    if cursor != payload.len() {
+        bail!("trailing compact payload bytes");
+    }
+    let created_at = get_u64(&fields, 9).unwrap_or(0);
+    let valid_from = get_u64(&fields, 12).unwrap_or(created_at);
+    Ok(Memory {
+        id: get_text(&fields, 1)
+            .ok_or_else(|| anyhow!("memory missing id"))?
+            .to_string(),
+        kind: get_text(&fields, 2)
+            .ok_or_else(|| anyhow!("memory missing kind"))?
+            .to_string(),
+        scope: get_text(&fields, 3)
+            .ok_or_else(|| anyhow!("memory missing scope"))?
+            .to_string(),
+        subject: get_text(&fields, 4)
+            .ok_or_else(|| anyhow!("memory missing subject"))?
+            .to_string(),
+        text: get_text(&fields, 5)
+            .ok_or_else(|| anyhow!("memory missing text"))?
+            .to_string(),
+        source: get_text(&fields, 6).unwrap_or("").to_string(),
+        confidence: get_f64(&fields, 7).unwrap_or(0.9),
+        sources: get_texts(&fields, 8),
+        created_at,
+        strategy: get_text(&fields, 10).map(ToString::to_string),
+        score: get_f64(&fields, 11),
+        merged: false,
+        valid_from,
+        valid_to: get_u64(&fields, 13),
+        supersedes: get_texts(&fields, 14),
+        conflict_of: get_text(&fields, 15).map(ToString::to_string),
+        trust: get_text(&fields, 16).unwrap_or("authored").to_string(),
+        source_commit: get_text(&fields, 17).map(ToString::to_string),
+    })
 }
 
 pub(crate) fn decode_memory(payload: &[u8]) -> Result<Memory> {
+    if payload.first() == Some(&COMPACT_MARKER) {
+        return decode_compact_memory(payload);
+    }
     let fields = decode_fields(payload)?;
     let created_at = get_u64(&fields, 9).unwrap_or(0);
     let valid_from = get_u64(&fields, 12).unwrap_or(created_at);
@@ -253,43 +426,6 @@ pub(crate) fn parse_ids(raw: &str) -> Vec<String> {
         .filter(|id| seen.insert((*id).to_string()))
         .map(ToString::to_string)
         .collect()
-}
-
-fn put_text(out: &mut Vec<u8>, id: u8, value: &str) {
-    out.push(id);
-    out.push(F_TEXT);
-    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-}
-
-fn put_u64(out: &mut Vec<u8>, id: u8, value: u64) {
-    out.push(id);
-    out.push(F_U64);
-    out.extend_from_slice(&8u32.to_le_bytes());
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_f64(out: &mut Vec<u8>, id: u8, value: f64) {
-    out.push(id);
-    out.push(F_F64);
-    out.extend_from_slice(&8u32.to_le_bytes());
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_texts<S: AsRef<str>>(out: &mut Vec<u8>, id: u8, values: &[S]) {
-    let size = 4 + values
-        .iter()
-        .map(|value| 4 + value.as_ref().len())
-        .sum::<usize>();
-    out.push(id);
-    out.push(F_TEXTS);
-    out.extend_from_slice(&(size as u32).to_le_bytes());
-    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for value in values {
-        let value = value.as_ref();
-        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        out.extend_from_slice(value.as_bytes());
-    }
 }
 
 pub(crate) enum Field {

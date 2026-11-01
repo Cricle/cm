@@ -129,9 +129,22 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 - Append-only data log with 64 KiB compressed blocks.
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
 - `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.
+- Memory payloads use a schema-aware presence map with varint lengths; defaults are omitted. `cm reindex` re-encodes old records into the compact schema.
+- The index uses 8-byte ID-hash slots and is internally versioned; older index versions remain readable.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded LFU/LRU block cache.
+
+### Compact schema and size
+
+`cm reindex` rewrites active records into the compact schema. Measured:
+
+| Store | Before | After | Change |
+|---|---:|---:|---:|
+| 10k | 601,355 B | 542,768 B | -9.7% |
+| 1M | 83,453,435 B | 77,438,756 B | -7.2% |
+
+The 1M file is roughly half data blocks and half page-compressed BM25 index; payload schema work alone cannot remove the index cost.
 
 ## Performance
 
