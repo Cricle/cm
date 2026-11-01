@@ -29,7 +29,7 @@ cm status --file cm
 ## Everyday use
 
 ```text
-cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo]
+cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
 cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800] [--full]
 cm forget --file cm --id <id>
 cm status [--file cm]
@@ -39,10 +39,17 @@ cm skill [--json] [--install] [--check]
 
 `recall` returns at most 3 memories and respects the token budget. The first hit is
 full text; additional hits are query-focused snippets, so 2–3 related memories
-usually fit in 800 tokens. Use `--full` for complete text on every hit. `doctor`
-emits one compact JSON health line; `--strict` exits 1 when it reports a problem.
-Read commands may create or update the disposable `cm.lru` cache; `cm` remains
-unchanged.
+usually fit in 800 tokens. Use `--full` for complete text on every hit.
+
+`remember` is idempotent for exact content: it checks the recent tail and, for
+small indexes (≤10k docs), active index records. A duplicate returns the existing
+ID with `"duplicate": true` instead of appending. Use `--force` for a deliberate
+duplicate; `append`/`import` never deduplicate. Large indexes use the cheap
+tail-only check to avoid decoding every record on each write.
+
+`doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
+problem. Read commands may create or update the disposable `cm.lru` cache; `cm`
+remains unchanged.
 
 ## Advanced commands
 

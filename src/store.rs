@@ -10,7 +10,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::cache::Cache;
 use crate::model::{
-    decode_fields, decode_memory, get_text, kind_id, memory_payload, now_ms, tokenize, Memory,
+    content_hash, decode_fields, decode_memory, get_text, kind_id, memory_payload, now_ms,
+    tokenize, Memory,
 };
 
 pub(crate) const HEADER_LEN: usize = 128;
@@ -826,6 +827,37 @@ pub(crate) fn encode_record(rec_type: u8, flags: u8, payload: &[u8]) -> Result<V
     out.extend_from_slice(&body);
     out.extend_from_slice(&xxh3_64(&hash_input).to_le_bytes());
     Ok(out)
+}
+
+/// Exact content duplicate check for the uncompressed tail plus a bounded
+/// exact scan for small indexes. Large indexes keep the cheap tail-only check;
+/// this avoids decoding a million records on every write.
+pub(crate) fn find_tail_duplicate(path: &Path, target: &Memory) -> Result<Option<String>> {
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let header = read_current_header(&mmap)?;
+    let records = read_records_from(&mmap, header.tail_start as usize)?;
+    let target_hash = content_hash(target);
+    for doc in active_docs(&records)? {
+        if content_hash(&doc.memory) == target_hash {
+            return Ok(Some(doc.memory.id));
+        }
+    }
+    if header.doc_count > 0 && header.doc_count <= 10_000 {
+        let mut store = Store::open(path)?;
+        let tail = store.tail_view()?;
+        for idx in 0..store.doc_count() {
+            if !store.is_active(idx)? {
+                continue;
+            }
+            let meta = store.doc_meta(idx)?;
+            let memory = store.doc_memory(&meta)?;
+            if !tail.hidden.contains(&memory.id) && content_hash(&memory) == target_hash {
+                return Ok(Some(memory.id));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn read_header_file(path: &Path) -> Result<Header> {

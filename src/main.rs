@@ -16,7 +16,8 @@ use crate::model::{
     KINDS,
 };
 use crate::store::{
-    append_record, encode_header, read_header_file, reindex_file, Header, Store, HEADER_LEN,
+    append_record, encode_header, find_tail_duplicate, read_header_file, reindex_file, Header,
+    Store, HEADER_LEN,
 };
 
 mod cache;
@@ -256,7 +257,12 @@ fn run() -> Result<()> {
                 trust: arg_value(&args, "--trust"),
                 source_commit: arg_value(&args, "--source-commit"),
             };
-            cmd_append_input(&arg_path(&args), &input, has_flag(&args, "--durable"))
+            cmd_remember_input(
+                &arg_path(&args),
+                &input,
+                has_flag(&args, "--durable"),
+                has_flag(&args, "--force"),
+            )
         }
         "recall" => {
             let query =
@@ -476,6 +482,21 @@ fn cmd_append_input(path: &Path, input: &AppendInput, durable: bool) -> Result<(
     validate_input(input)?;
     read_header_file(path)?;
     let memory = memory_from_input(input)?;
+    append_record(path, 2, &memory_payload(&memory), durable)?;
+    outln!("{}", json!({"ok": true, "id": memory.id}));
+    Ok(())
+}
+
+fn cmd_remember_input(path: &Path, input: &AppendInput, durable: bool, force: bool) -> Result<()> {
+    validate_input(input)?;
+    read_header_file(path)?;
+    let memory = memory_from_input(input)?;
+    if !force {
+        if let Some(id) = find_tail_duplicate(path, &memory)? {
+            outln!("{}", json!({"ok": true, "id": id, "duplicate": true}));
+            return Ok(());
+        }
+    }
     append_record(path, 2, &memory_payload(&memory), durable)?;
     outln!("{}", json!({"ok": true, "id": memory.id}));
     Ok(())
@@ -1705,6 +1726,63 @@ mod tests {
         assert_eq!(test_active_total(&path), 2);
         cmd_verify(&path, true).expect("verify");
         assert!(cmd_doctor(&path).expect("doctor"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remember_dedupes_tail_and_small_index() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        cmd_remember_input(
+            &path,
+            &test_input("dedup subject", "Dedup Body"),
+            true,
+            false,
+        )
+        .expect("first remember");
+        let first_id = {
+            let mut store = Store::open(&path).expect("open");
+            store.scan_page(1, 0).expect("scan")[0].id.clone()
+        };
+        assert_eq!(test_active_total(&path), 1);
+        cmd_remember_input(
+            &path,
+            &test_input("dedup subject", "dedup   body"),
+            true,
+            false,
+        )
+        .expect("tail duplicate");
+        assert_eq!(test_active_total(&path), 1);
+        cmd_reindex(&path).expect("reindex");
+        cmd_remember_input(
+            &path,
+            &test_input("dedup subject", "dedup body"),
+            true,
+            false,
+        )
+        .expect("index duplicate");
+        assert_eq!(test_active_total(&path), 1);
+        let before_force = {
+            let mut store = Store::open(&path).expect("open");
+            store.scan_page(usize::MAX, 0).expect("scan").len()
+        };
+        cmd_remember_input(
+            &path,
+            &test_input("dedup subject", "dedup body"),
+            true,
+            true,
+        )
+        .expect("force duplicate");
+        assert_eq!(test_active_total(&path), 2);
+        assert_eq!(before_force, 1);
+        assert_eq!(
+            {
+                let mut store = Store::open(&path).expect("open");
+                store.scan_page(usize::MAX, 0).expect("scan")[0].id.clone()
+            },
+            first_id
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

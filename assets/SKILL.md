@@ -35,6 +35,7 @@ $CM remember --file "$F" --kind decision --scope <scope> \
 ```
 
 - Write at decision time, not as a final memory pass; one decision per record.
+- `remember` skips exact duplicate content in the recent tail/small index and returns the existing ID. Use `--force` only for deliberate duplicates; `append`/`import` never dedupe.
 - Keep text under ~400 chars: what changed, why, file/symbol. No progress logs, timelines, or transcripts.
 - Use `path:symbol` as source for code facts, `agent:<name>` for decisions.
 - If a later decision invalidates an earlier one, pass `--supersedes <id>`; keep both only on a real conflict (run `cm conflicts`).
