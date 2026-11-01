@@ -130,7 +130,7 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
 - `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.
 - Memory payloads use a schema-aware presence map with varint lengths; defaults are omitted. `cm reindex` re-encodes old records into the compact schema.
-- The index uses 8-byte ID-hash slots and is internally versioned; older index versions remain readable.
+- The index uses 8-byte ID-hash slots and delta-varint postings; older index versions remain readable.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded LFU/LRU block cache.
@@ -141,10 +141,10 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 
 | Store | Before | After | Change |
 |---|---:|---:|---:|
-| 10k | 601,355 B | 542,768 B | -9.7% |
-| 1M | 83,453,435 B | 77,438,756 B | -7.2% |
+| 10k | 601,355 B | 466,680 B | -22.4% |
+| 1M | 83,453,435 B | 68,186,941 B | -18.3% |
 
-The 1M file is roughly half data blocks and half page-compressed BM25 index; payload schema work alone cannot remove the index cost.
+The compact payload removes field-ID/type overhead; delta-varint postings reduce the BM25 index from 88 MB of raw postings to ~14 MB. The 1M file is now roughly balanced between data blocks and the page-compressed index.
 
 ## Performance
 
@@ -156,7 +156,7 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 | `get --id` | ~6 ms |
 | `similar --top 16` | ~11 ms |
 | `append` | ~8 ms |
-| `search --top 8` | ~12 ms |
+| `search --top 8` | ~8 ms |
 
 `checkpoint` (cold process, 1M records) measured ~1.2s; 10k ~20ms.
 `checkpoint --in-place` measured ~0.13s / 1M and ~9ms / 10k, adding only one

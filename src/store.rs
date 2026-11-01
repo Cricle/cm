@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use memmap2::Mmap;
 use xxhash_rust::xxh3::xxh3_64;
@@ -29,6 +29,7 @@ pub(crate) const DOC_SIZE: usize = 32;
 pub(crate) const HASH_SLOT: usize = 16;
 const HASH_SLOT8: usize = 8;
 const INDEX_VERSION_HASH8: u8 = 2;
+const INDEX_VERSION_DELTA: u8 = 4;
 pub(crate) const INDEX_HEADER: usize = 128;
 const MAGIC: &[u8; 4] = b"CM1\0";
 const VERSION: u8 = 1;
@@ -438,26 +439,30 @@ impl Store {
         None
     }
 
-    fn posting_tf(&self, start: u32, count: u32, doc_idx: u32) -> Option<u32> {
+    fn decode_postings(&self, start: u32, count: u32) -> Result<Vec<(u32, u32)>> {
         let ib = self.index();
         let postings_off = read_u64(ib, 80) as usize;
-        let mut low = start as usize;
-        let mut high = start as usize + count as usize;
-        while low < high {
-            let mid = (low + high) / 2;
-            let current = read_u32(ib, postings_off + mid * 8);
-            if current < doc_idx {
-                low = mid + 1;
-            } else {
-                high = mid;
+        let mut postings = Vec::with_capacity(count as usize);
+        if ib[4] >= INDEX_VERSION_DELTA {
+            let mut cursor = postings_off + start as usize;
+            let mut previous = 0u32;
+            for _ in 0..count {
+                let delta = take_varint(ib, &mut cursor)? as u32;
+                let doc_idx = previous
+                    .checked_add(delta)
+                    .context("posting delta overflow")?;
+                let tf = take_varint(ib, &mut cursor)? as u32;
+                postings.push((doc_idx, tf));
+                previous = doc_idx;
+            }
+        } else {
+            let stride = posting_stride(ib);
+            for i in 0..count {
+                let offset = postings_off + (start as usize + i as usize) * stride;
+                postings.push((read_u32(ib, offset), read_posting_tf(ib, offset, stride)));
             }
         }
-        if low < start as usize + count as usize && read_u32(ib, postings_off + low * 8) == doc_idx
-        {
-            Some(read_u32(ib, postings_off + low * 8 + 4))
-        } else {
-            None
-        }
+        Ok(postings)
     }
 
     fn bm25_all_terms(
@@ -474,7 +479,6 @@ impl Store {
         let avgdl = read_f64(ib, 96);
         let mut scores = vec![0.0f64; doc_count as usize];
         let mut touched = Vec::new();
-        let postings_off = read_u64(ib, 80) as usize;
         let docs_off = read_u64(ib, 24) as usize;
         let active_off = read_u64(ib, 48) as usize;
         for term in terms {
@@ -483,9 +487,7 @@ impl Store {
             };
             let df = count as f64;
             let idf = (1.0 + (doc_count - df + 0.5) / (df + 0.5)).ln();
-            for p in 0..count as usize {
-                let offset = postings_off + (start as usize + p) * 8;
-                let doc_idx = read_u32(ib, offset);
+            for (doc_idx, tf) in self.decode_postings(start, count)? {
                 if exclude == Some(doc_idx)
                     || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
                     || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
@@ -502,7 +504,7 @@ impl Store {
                 }
                 let token_count = read_u32(ib, docs_off + doc_idx as usize * DOC_SIZE + 12) as f64;
                 let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
-                let tf = read_u32(ib, offset + 4) as f64;
+                let tf = tf as f64;
                 let score = idf * (tf * 2.2) / (tf + norm);
                 let idx = doc_idx as usize;
                 if scores[idx] == 0.0 {
@@ -572,13 +574,23 @@ impl Store {
         term_info.sort_by_key(|(_, count, _)| *count);
         let (anchor_start, anchor_count, _) = term_info[0];
         let max_candidates = 50_000usize;
-        let postings_off = read_u64(ib, 80) as usize;
         let active_off = read_u64(ib, 48) as usize;
         let docs_off = read_u64(ib, 24) as usize;
+        let anchor_postings = self.decode_postings(anchor_start, anchor_count)?;
+        let mut extra_maps: Vec<Option<HashMap<u32, u32>>> = Vec::with_capacity(term_info.len());
+        for (index, (start, count, _)) in term_info.iter().enumerate() {
+            if index == 0 {
+                extra_maps.push(None);
+            } else {
+                extra_maps.push(Some(
+                    self.decode_postings(*start, *count)?
+                        .into_iter()
+                        .collect::<HashMap<_, _>>(),
+                ));
+            }
+        }
         let mut results = Vec::new();
-        for p in 0..(anchor_count as usize).min(max_candidates) {
-            let offset = postings_off + (anchor_start as usize + p) * 8;
-            let doc_idx = read_u32(ib, offset);
+        for (doc_idx, anchor_tf) in anchor_postings.into_iter().take(max_candidates) {
             if exclude == Some(doc_idx)
                 || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
                 || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
@@ -596,12 +608,12 @@ impl Store {
             let token_count = read_u32(ib, docs_off + doc_idx as usize * DOC_SIZE + 12) as f64;
             let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
             let mut score = 0.0;
-            for (index, (start, count, idf)) in term_info.iter().enumerate() {
+            for (index, (_, _, idf)) in term_info.iter().enumerate() {
                 let tf = if index == 0 {
-                    read_u32(ib, offset + 4) as f64
+                    anchor_tf as f64
                 } else {
-                    match self.posting_tf(*start, *count, doc_idx) {
-                        Some(tf) => tf as f64,
+                    match extra_maps[index].as_ref().and_then(|map| map.get(&doc_idx)) {
+                        Some(tf) => *tf as f64,
                         None => continue,
                     }
                 };
@@ -1558,7 +1570,12 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
         tokens_data.extend_from_slice(entry.token.as_bytes());
         tokens_data.extend_from_slice(&(postings.len() as u32).to_le_bytes());
         tokens_data.extend_from_slice(&(entry.postings.len() as u32).to_le_bytes());
-        postings.extend(entry.postings.iter().copied());
+        let mut previous = 0u32;
+        for (doc, tf) in &entry.postings {
+            put_varint(&mut postings, (*doc - previous) as usize);
+            previous = *doc;
+            put_varint(&mut postings, *tf as usize);
+        }
     }
     token_offsets.push(tokens_data.len() as u64);
 
@@ -1580,7 +1597,7 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
     let token_offsets_off = align8(scopes_off + scope_data.len());
     let tokens_off = align8(token_offsets_off + 8 * (token_count + 1));
     let postings_off = align8(tokens_off + tokens_data.len());
-    let index_len = align8(postings_off + 8 * postings.len());
+    let index_len = align8(postings_off + postings.len());
     let avgdl = if n == 0 {
         0.0
     } else {
@@ -1589,7 +1606,7 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
 
     let mut index = vec![0u8; index_len];
     write_u32(&mut index, 0, 0x31584449);
-    index[4] = INDEX_VERSION_HASH8;
+    index[4] = INDEX_VERSION_DELTA;
     index[6..8].copy_from_slice(&(INDEX_HEADER as u16).to_le_bytes());
     write_u32(&mut index, 8, n as u32);
     write_u32(&mut index, 12, scopes.len() as u32);
@@ -1646,10 +1663,7 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
         write_u64(&mut index, token_offsets_off + i * 8, *offset);
     }
     index[tokens_off..tokens_off + tokens_data.len()].copy_from_slice(&tokens_data);
-    for (i, (doc, tf)) in postings.iter().enumerate() {
-        write_u32(&mut index, postings_off + i * 8, *doc);
-        write_u32(&mut index, postings_off + i * 8 + 4, *tf);
-    }
+    index[postings_off..postings_off + postings.len()].copy_from_slice(&postings);
     Ok(index)
 }
 
@@ -1778,6 +1792,45 @@ fn read_current_header_with_slot(data: &[u8]) -> Result<(Header, usize)> {
 
 pub(crate) fn read_current_header(data: &[u8]) -> Result<Header> {
     read_current_header_with_slot(data).map(|(header, _)| header)
+}
+
+fn put_varint(out: &mut Vec<u8>, mut value: usize) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn take_varint(data: &[u8], cursor: &mut usize) -> Result<usize> {
+    let mut value = 0usize;
+    let mut shift = 0u32;
+    loop {
+        let byte = *data
+            .get(*cursor)
+            .ok_or_else(|| anyhow!("truncated posting varint"))?;
+        *cursor += 1;
+        value |= ((byte & 0x7F) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= usize::BITS {
+            bail!("posting varint overflow");
+        }
+    }
+}
+
+fn posting_stride(_index: &[u8]) -> usize {
+    8
+}
+
+fn read_posting_tf(data: &[u8], offset: usize, stride: usize) -> u32 {
+    if stride == 6 {
+        u16::from_le_bytes(data[offset + 4..offset + 6].try_into().unwrap()) as u32
+    } else {
+        read_u32(data, offset + 4)
+    }
 }
 
 fn read_u32(data: &[u8], offset: usize) -> u32 {
