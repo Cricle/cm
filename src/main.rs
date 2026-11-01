@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use fs2::FileExt;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -274,7 +273,7 @@ fn run() -> Result<()> {
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
-        "checkpoint" => cmd_checkpoint(&arg_path(&args)),
+        "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
             if !ok && has_flag(&args, "--strict") {
@@ -409,6 +408,8 @@ fn cmd_init(path: &Path, empty: bool) -> Result<()> {
         data_start: HEADER_LEN as u64,
         tail_start: HEADER_LEN as u64,
         doc_count: 0,
+        generation: 0,
+        flags: 0,
     };
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&encode_header(&header))?;
@@ -498,8 +499,9 @@ fn cmd_export(path: &Path, format: String) -> Result<()> {
 fn cmd_import(path: &Path) -> Result<()> {
     read_header_file(path)?;
     let store_lock = crate::store::acquire_store_lock(path)?;
+    // The store lock file is the writer mutex; a byte-range lock on the store
+    // itself would break concurrent readers on Windows.
     let file = OpenOptions::new().read(true).append(true).open(path)?;
-    file.lock_exclusive()?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     let mut count = 0u64;
     for line in io::stdin().lock().lines() {
@@ -531,11 +533,10 @@ fn cmd_import(path: &Path) -> Result<()> {
     }
     writer.flush()?;
     writer.get_ref().sync_all()?;
-    let lock_file = writer
+    let file = writer
         .into_inner()
         .map_err(|error| anyhow!("flush import: {error}"))?;
-    let _ = lock_file.unlock();
-    drop(lock_file);
+    drop(file);
     drop(store_lock);
     reindex_file(path)?;
     outln!(
@@ -605,12 +606,14 @@ fn cmd_skill(json_output: bool, install: bool, check: bool, dir: Option<String>)
     Ok(())
 }
 
-fn cmd_checkpoint(path: &Path) -> Result<()> {
-    let header = crate::store::checkpoint_file(path)?;
+fn cmd_checkpoint(path: &Path, in_place: bool) -> Result<()> {
+    let header = crate::store::checkpoint_file(path, in_place)?;
     outln!(
         "{}",
         json!({
             "ok": true,
+            "mode": if in_place { "in-place" } else { "compact" },
+            "generation": header.generation,
             "doc_count": header.doc_count,
             "blocks": header.block_count,
             "index_bytes": header.index_len,
@@ -707,7 +710,7 @@ fn cmd_search(
             }
         }
     }
-    for (score, memory) in tail.bm25(query, scope.as_deref(), None, None, top.min(100)) {
+    for (score, memory) in tail.bm25(query, scope.as_deref(), kind.as_deref(), None, top.min(100)) {
         hits.insert(memory.id.clone(), (score, memory));
     }
     let mut candidates: Vec<SearchHit> = hits
@@ -1592,7 +1595,7 @@ mod tests {
                 .map(|memory| memory.id)
                 .collect::<Vec<_>>()
         };
-        cmd_checkpoint(&path).expect("checkpoint");
+        cmd_checkpoint(&path, true).expect("checkpoint");
         let after = {
             let mut store = Store::open(&path).expect("open after checkpoint");
             store

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +12,11 @@ use crate::cache::Cache;
 use crate::model::{decode_fields, decode_memory, get_text, kind_id, now_ms, tokenize, Memory};
 
 pub(crate) const HEADER_LEN: usize = 128;
+const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
+const HEADER_SLOT: usize = HEADER_LEN;
+const HEADER_FLAG_DUAL: u32 = 1;
+const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
+const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
 pub(crate) const DOC_SIZE: usize = 32;
 pub(crate) const HASH_SLOT: usize = 16;
@@ -38,6 +43,8 @@ pub(crate) struct Header {
     pub data_start: u64,
     pub tail_start: u64,
     pub doc_count: u64,
+    pub generation: u64,
+    pub flags: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -81,7 +88,7 @@ impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&file)? };
-        let header = decode_header(&mmap)?;
+        let header = read_current_header(&mmap)?;
         if header.index_len == 0 {
             bail!("no index; run cm reindex");
         }
@@ -102,7 +109,21 @@ impl Store {
                     if xxh3_64(&index_raw) != header.index_hash {
                         bail!("index hash mismatch");
                     }
-                    Cache::create(path, header.index_hash, &index_raw)?
+                    match Cache::create(path, header.index_hash, &index_raw) {
+                        Ok(cache) => cache,
+                        // The cache is disposable: a read must still work when
+                        // a concurrent writer replaces it or the directory is
+                        // read-only. Retry the open once, then fall back to an
+                        // in-process cache.
+                        Err(_) => match Cache::open_existing(
+                            path,
+                            header.index_hash,
+                            header.index_raw_len as usize,
+                        ) {
+                            Some(cache) => cache,
+                            None => Cache::memory(header.index_hash, &index_raw)?,
+                        },
+                    }
                 }
             };
         Ok(Self {
@@ -588,7 +609,12 @@ fn parse_memory_record(raw: &[u8]) -> Result<Memory> {
         bail!("short record body");
     }
     let payload = &raw[14..4 + body_len];
-    decode_memory(payload)
+    let mut memory = decode_memory(payload)?;
+    // The payload format has no merged bit; the record type is the source of
+    // truth. Index blocks keep the original T_MERGE record, so preserve that
+    // flag when reading a merged doc back out of a block (e.g. after reindex).
+    memory.merged = raw[4] == T_MERGE;
+    Ok(memory)
 }
 
 pub(crate) fn encode_record(rec_type: u8, flags: u8, payload: &[u8]) -> Result<Vec<u8>> {
@@ -612,10 +638,12 @@ pub(crate) fn encode_record(rec_type: u8, flags: u8, payload: &[u8]) -> Result<V
 }
 
 pub(crate) fn read_header_file(path: &Path) -> Result<Header> {
-    let mut file = File::open(path)?;
-    let mut bytes = [0u8; HEADER_LEN];
-    std::io::Read::read_exact(&mut file, &mut bytes)?;
-    decode_header(&bytes)
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut bytes = [0u8; DUAL_HEADER_LEN];
+    std::io::Read::read_exact(&mut file, &mut bytes[..HEADER_LEN])
+        .with_context(|| format!("read header {}", path.display()))?;
+    let extra = std::io::Read::read(&mut file, &mut bytes[HEADER_LEN..]).unwrap_or(0);
+    read_current_header(&bytes[..HEADER_LEN + extra])
 }
 
 pub(crate) fn append_record(
@@ -626,17 +654,17 @@ pub(crate) fn append_record(
 ) -> Result<()> {
     // The lock file, not the store inode, is the stable mutex: checkpoint and
     // reindex replace the store by rename, so a lock held on the old cm file
-    // would not exclude writers that open the new path.
+    // would not exclude writers that open the new path. Do not also take a
+    // byte-range lock on the store itself: on Windows that makes concurrent
+    // lock-free header reads fail with ERROR_LOCK_VIOLATION.
     let _store_lock = acquire_store_lock(path)?;
     let mut file = OpenOptions::new().read(true).append(true).open(path)?;
-    file.lock_exclusive()?;
     file.write_all(&encode_record(rec_type, 0, payload)?)?;
     if durable {
         file.sync_all()?;
     } else {
         file.flush()?;
     }
-    let _ = file.unlock();
     Ok(())
 }
 
@@ -658,6 +686,56 @@ fn read_records_from_checked(data: &[u8], start: usize) -> Result<Vec<Record>> {
     Ok(records)
 }
 
+/// Parse a contiguous run of records that must end exactly at EOF. Used only
+/// to recover records appended after a checkpoint was killed midway through
+/// appending an index generation: the partial index bytes are unreachable, but
+/// later records are still valid and must not be silently dropped.
+fn parse_record_chain_to_eof(data: &[u8], mut offset: usize) -> Option<Vec<Record>> {
+    let mut records = Vec::new();
+    while offset < data.len() {
+        if data.len() - offset < 4 {
+            return None;
+        }
+        let body_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        if !(10..=MAX_BODY).contains(&body_len) || data.len() - offset < 4 + body_len + 8 {
+            return None;
+        }
+        let body_end = offset + 4 + body_len;
+        let stored = u64::from_le_bytes(data[body_end..body_end + 8].try_into().unwrap());
+        if stored != xxh3_64(&data[offset..body_end]) {
+            return None;
+        }
+        records.push(Record {
+            rec_type: data[offset + 4],
+            raw: data[offset..body_end + 8].to_vec(),
+        });
+        offset = body_end + 8;
+    }
+    (!records.is_empty()).then_some(records)
+}
+
+fn recover_records_after_partial_index(data: &[u8], search_from: usize) -> Option<Vec<Record>> {
+    // Scan forward from just after the partial marker. The uncompressed bytes
+    // before the first later record are compressed index data, so a false
+    // positive would need a valid body length and a matching XXH3 checksum.
+    (search_from..data.len()).find_map(|offset| parse_record_chain_to_eof(data, offset))
+}
+
+/// A kill while writing the marker can leave fewer than eight bytes of it
+/// before a later record. Only treat the bytes as a partial marker when they
+/// match a non-empty prefix and a valid record chain starts after them.
+fn recover_after_partial_marker_prefix(data: &[u8], offset: usize) -> Option<Vec<Record>> {
+    let prefix_len = data[offset..]
+        .iter()
+        .zip(INDEX_MARKER.iter())
+        .take_while(|(actual, expected)| actual == expected)
+        .count();
+    if prefix_len == 0 {
+        return None;
+    }
+    recover_records_after_partial_index(data, offset + 1)
+}
+
 fn read_records_from_impl(data: &[u8], start: usize, strict: bool) -> Result<(Vec<Record>, usize)> {
     if start > data.len() {
         bail!("record start {start} beyond end of data ({})", data.len());
@@ -665,22 +743,74 @@ fn read_records_from_impl(data: &[u8], start: usize, strict: bool) -> Result<(Ve
     let mut offset = start;
     let mut records = Vec::new();
     while offset < data.len() {
-        if data.len() - offset < 4 {
+        let remaining = data.len() - offset;
+        if remaining < INDEX_MARKER_LEN {
+            let marker_prefix = if remaining >= 8 {
+                &data[offset..offset + 8] == INDEX_MARKER
+            } else {
+                INDEX_MARKER.starts_with(&data[offset..])
+            };
+            if marker_prefix {
+                if strict {
+                    bail!("truncated index generation at offset {offset}");
+                }
+                if let Some(recovered) = recover_records_after_partial_index(data, offset + 1) {
+                    records.extend(recovered);
+                    return Ok((records, data.len()));
+                }
+                break;
+            }
+        }
+        if remaining >= INDEX_MARKER_LEN && &data[offset..offset + 8] == INDEX_MARKER {
+            let len =
+                u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap()) as usize;
+            let end = offset
+                .checked_add(INDEX_MARKER_LEN)
+                .and_then(|value| value.checked_add(len))
+                .context("index generation length overflow")?;
+            if end > data.len() {
+                if strict {
+                    bail!("truncated index generation at offset {offset}");
+                }
+                if let Some(recovered) = recover_records_after_partial_index(data, offset + 1) {
+                    records.extend(recovered);
+                    return Ok((records, data.len()));
+                }
+                break;
+            }
+            offset = end;
+            continue;
+        }
+        if remaining < 4 {
             if strict {
                 bail!("truncated record header at offset {offset}");
+            }
+            if let Some(recovered) = recover_after_partial_marker_prefix(data, offset) {
+                records.extend(recovered);
+                return Ok((records, data.len()));
             }
             break;
         }
         let body_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        if !(10..=MAX_BODY).contains(&body_len) || data.len() - offset < 4 + body_len + 8 {
+        if !(10..=MAX_BODY).contains(&body_len) || remaining < 4 + body_len + 8 {
             if strict {
                 bail!("truncated or invalid record at offset {offset}");
+            }
+            if let Some(recovered) = recover_after_partial_marker_prefix(data, offset) {
+                records.extend(recovered);
+                return Ok((records, data.len()));
             }
             break;
         }
         let body_end = offset + 4 + body_len;
         let stored = u64::from_le_bytes(data[body_end..body_end + 8].try_into().unwrap());
         if stored != xxh3_64(&data[offset..body_end]) {
+            if !strict {
+                if let Some(recovered) = recover_after_partial_marker_prefix(data, offset) {
+                    records.extend(recovered);
+                    return Ok((records, data.len()));
+                }
+            }
             bail!("XXH3 mismatch at offset {offset}");
         }
         records.push(Record {
@@ -690,6 +820,55 @@ fn read_records_from_impl(data: &[u8], start: usize, strict: bool) -> Result<(Ve
         offset = body_end + 8;
     }
     Ok((records, offset))
+}
+
+/// Return the offset of a trailing, incomplete index generation if the tail
+/// ends with one. A process killed while `checkpoint --in-place` appends the
+/// marker/length/compressed index can leave such bytes behind; the currently
+/// committed header never references them, so they are safe to discard.
+fn partial_index_tail_start(data: &[u8], start: usize) -> Result<Option<usize>> {
+    if start > data.len() {
+        bail!("record start {start} beyond end of data ({})", data.len());
+    }
+    let mut offset = start;
+    while offset < data.len() {
+        let remaining = data.len() - offset;
+        if remaining >= INDEX_MARKER_LEN && &data[offset..offset + 8] == INDEX_MARKER {
+            let len =
+                u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap()) as usize;
+            let end = offset
+                .checked_add(INDEX_MARKER_LEN)
+                .and_then(|value| value.checked_add(len))
+                .context("index generation length overflow")?;
+            if end > data.len() {
+                return Ok(Some(offset));
+            }
+            offset = end;
+            continue;
+        }
+        if remaining < INDEX_MARKER_LEN {
+            if remaining >= 8 && &data[offset..offset + 8] == INDEX_MARKER {
+                return Ok(Some(offset));
+            }
+            if remaining < 8 && INDEX_MARKER.starts_with(&data[offset..]) {
+                return Ok(Some(offset));
+            }
+        }
+        if remaining < 4 {
+            return Ok(recover_after_partial_marker_prefix(data, offset).map(|_| offset));
+        }
+        let body_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        if !(10..=MAX_BODY).contains(&body_len) || remaining < 4 + body_len + 8 {
+            return Ok(recover_after_partial_marker_prefix(data, offset).map(|_| offset));
+        }
+        let body_end = offset + 4 + body_len;
+        let stored = u64::from_le_bytes(data[body_end..body_end + 8].try_into().unwrap());
+        if stored != xxh3_64(&data[offset..body_end]) {
+            return Ok(recover_after_partial_marker_prefix(data, offset).map(|_| offset));
+        }
+        offset = body_end + 8;
+    }
+    Ok(None)
 }
 
 pub(crate) fn read_all_records(data: &[u8], header: &Header) -> Result<Vec<Record>> {
@@ -769,7 +948,7 @@ fn active_docs(records: &[Record]) -> Result<Vec<ActiveDoc<'_>>> {
 pub(crate) fn verify_full(path: &Path) -> Result<u64> {
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    let header = decode_header(&mmap)?;
+    let header = read_current_header(&mmap)?;
     if header.index_len > 0 {
         let index_start = header.index_off as usize;
         let index_end = index_start
@@ -800,7 +979,7 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     let _store_lock = acquire_store_lock(path)?;
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    let old_header = decode_header(&mmap)?;
+    let old_header = read_current_header(&mmap)?;
     let created_at = old_header.created_at;
     let records = read_all_records(&mmap, &old_header)?;
     let active = active_docs(&records)?;
@@ -808,7 +987,7 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
     let index_hash = xxh3_64(&index_raw);
     let block_count = blocks.len();
-    let block_table_off = HEADER_LEN;
+    let block_table_off = DUAL_HEADER_LEN;
     let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
     let data_start = index_off + index_comp.len();
     let mut block_offsets = Vec::with_capacity(block_count);
@@ -828,12 +1007,15 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
         data_start: data_start as u64,
         tail_start: cursor as u64,
         doc_count: doc_count as u64,
+        generation: 1,
+        flags: HEADER_FLAG_DUAL,
     };
     let tmp = temp_path(path);
     if tmp.exists() {
         fs::remove_file(&tmp).ok();
     }
     let mut out = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    out.write_all(&encode_header(&header))?;
     out.write_all(&encode_header(&header))?;
     for (block, offset) in blocks.iter().zip(block_offsets.iter()) {
         let mut entry = [0u8; BLOCK_ENTRY];
@@ -853,36 +1035,20 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
     out.sync_all()?;
     drop(out);
     fs::rename(&tmp, path)?;
-    let cache_path = path.with_file_name("cm.lru");
-    if cache_path.exists() {
-        fs::remove_file(&cache_path).ok();
-    }
+    // The cache is keyed by index hash and replaced atomically on the next
+    // open. Do not delete it: a reader may be mapping it right now, and a
+    // missing/recreated cache must never turn a read command into an error.
     Ok(header)
 }
 
-/// Copy-on-write checkpoint: keep data blocks and the index structure
-/// byte-for-byte, applying tail tombstones/merges as an active-bit mask.
-/// Old compressed blocks are copied into a new file; only the index bitset is
-/// modified and recompressed. Full dead-record/index compaction stays in
-/// `reindex`.
-pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
-    // The lock file is stable across the rename below, so appends and reindex
-    // cannot write into the old inode while its bytes are being copied.
-    let _store_lock = acquire_store_lock(path)?;
-    let mut store = Store::open(path)?;
-    let old_header = store.header;
-    let tail_start = old_header.tail_start as usize;
-    if tail_start > store.mmap.len() {
-        bail!("tail out of bounds");
-    }
-    // A checkpoint must not bless a damaged tail: reject truncated/garbage
-    // records before creating cm.tmp, while the original file is untouched.
-    read_records_from_checked(&store.mmap, tail_start).context("validate tail")?;
-    let tail = store.tail_view()?;
+fn mask_index_hidden(
+    store: &mut Store,
+    index_raw: &mut [u8],
+    hidden: &HashSet<String>,
+) -> Result<bool> {
     let doc_count = store.doc_count();
-    let mut index_raw = store.index().to_vec();
-    let active_off = read_u64(&index_raw, 48) as usize;
-    let scopes_off = read_u64(&index_raw, 56) as usize;
+    let active_off = read_u64(index_raw, 48) as usize;
+    let scopes_off = read_u64(index_raw, 56) as usize;
     let active_len = (doc_count as usize).div_ceil(8);
     if active_off < INDEX_HEADER
         || scopes_off > index_raw.len()
@@ -892,11 +1058,26 @@ pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
     {
         bail!("index active bitset out of bounds");
     }
-    for id in &tail.hidden {
+    let mut changed = false;
+    for id in hidden {
         if let Some((idx, _)) = store.find_doc(id)? {
-            index_raw[active_off + idx as usize / 8] &= !(1u8 << (idx % 8));
+            let byte = index_raw[active_off + idx as usize / 8];
+            let bit = 1u8 << (idx % 8);
+            if byte & bit != 0 {
+                index_raw[active_off + idx as usize / 8] = byte & !bit;
+                changed = true;
+            }
         }
     }
+    Ok(changed)
+}
+
+fn migrate_checkpoint(
+    path: &Path,
+    store: &Store,
+    old_header: Header,
+    index_raw: Vec<u8>,
+) -> Result<Header> {
     let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
     let index_hash = xxh3_64(&index_raw);
 
@@ -932,8 +1113,12 @@ pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
         }
         old_blocks.push(OldBlock { offset, comp_len });
     }
+    let tail_start = old_header.tail_start as usize;
+    if tail_start > store.mmap.len() {
+        bail!("tail out of bounds");
+    }
 
-    let block_table_off = HEADER_LEN;
+    let block_table_off = DUAL_HEADER_LEN;
     let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
     let data_start = index_off + index_comp.len();
     let mut block_offsets = Vec::with_capacity(block_count);
@@ -952,14 +1137,16 @@ pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
         index_hash,
         data_start: data_start as u64,
         tail_start: cursor as u64,
-        doc_count: doc_count as u64,
+        doc_count: old_header.doc_count,
+        generation: 1,
+        flags: HEADER_FLAG_DUAL,
     };
-
     let tmp = temp_path(path);
     if tmp.exists() {
         fs::remove_file(&tmp).ok();
     }
     let mut out = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    out.write_all(&encode_header(&header))?;
     out.write_all(&encode_header(&header))?;
     for (block, offset) in old_blocks.iter().zip(block_offsets.iter()) {
         let mut entry = [0u8; BLOCK_ENTRY];
@@ -973,16 +1160,89 @@ pub(crate) fn checkpoint_file(path: &Path) -> Result<Header> {
     for block in &old_blocks {
         out.write_all(&store.mmap[block.offset..block.offset + 16 + block.comp_len])?;
     }
-    out.write_all(&store.mmap[tail_start..])?;
+    for record in read_records_from(&store.mmap, tail_start)? {
+        out.write_all(&record.raw)?;
+    }
     out.sync_all()?;
     drop(out);
-    drop(store);
     fs::rename(&tmp, path)?;
+    // The cache is keyed by index hash and replaced atomically on the next
+    // open. Do not delete it: a reader may be mapping it right now, and a
+    // missing/recreated cache must never turn a read command into an error.
+    Ok(header)
+}
+
+/// Copy-on-write checkpoint. New indexes are appended after the current
+/// tail, then an inactive 128-byte header slot is committed. Data blocks and
+/// previous index generations are never rewritten. Old one-header files are
+/// migrated once to the dual-header layout by copying immutable blocks.
+pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
+    let _store_lock = acquire_store_lock(path)?;
+    let mut store = Store::open(path)?;
+    let (current, slot) = read_current_header_with_slot(&store.mmap)?;
+    let tail_start = current.tail_start as usize;
+    if tail_start > store.mmap.len() {
+        bail!("tail out of bounds");
+    }
+    // A crash during an earlier in-place append can leave a partial index
+    // generation at EOF. It is unreachable (no committed header points at it),
+    // so validate the records before it and heal the file with a full rewrite
+    // instead of refusing every future checkpoint until a manual reindex.
+    let partial_index = match read_records_from_checked(&store.mmap, tail_start) {
+        Ok(_) => None,
+        Err(error) => {
+            match partial_index_tail_start(&store.mmap, tail_start).context("validate tail")? {
+                Some(offset) => Some(offset),
+                None => return Err(error).context("validate tail"),
+            }
+        }
+    };
+    let tail = store.tail_view()?;
+    let mut index_raw = store.index().to_vec();
+    let changed = mask_index_hidden(&mut store, &mut index_raw, &tail.hidden)?;
+
+    if !in_place || current.flags & HEADER_FLAG_DUAL == 0 || partial_index.is_some() {
+        return migrate_checkpoint(path, &store, current, index_raw);
+    }
+    if !changed {
+        return Ok(current);
+    }
+
+    let index_comp = zstd::bulk::compress(&index_raw, ZSTD_LEVEL)?;
+    let index_hash = xxh3_64(&index_raw);
+    let index_off = store
+        .mmap
+        .len()
+        .checked_add(INDEX_MARKER_LEN)
+        .context("index offset overflow")?;
+    let mut out = OpenOptions::new().append(true).open(path)?;
+    out.write_all(INDEX_MARKER)?;
+    out.write_all(&(index_comp.len() as u64).to_le_bytes())?;
+    out.write_all(&index_comp)?;
+    out.sync_all()?;
+    drop(out);
+
+    let mut next = current;
+    next.index_off = index_off as u64;
+    next.index_len = index_comp.len() as u64;
+    next.index_raw_len = index_raw.len() as u64;
+    next.index_hash = index_hash;
+    next.generation = current.generation.saturating_add(1);
+    next.flags |= HEADER_FLAG_DUAL;
+
+    let other = if slot == 0 { HEADER_SLOT } else { 0 };
+    let mut header_file = OpenOptions::new().write(true).open(path)?;
+    header_file.seek(SeekFrom::Start(other as u64))?;
+    header_file.write_all(&encode_header(&next))?;
+    header_file.sync_all()?;
+    drop(header_file);
+    drop(store);
+
     let cache_path = path.with_file_name("cm.lru");
     if cache_path.exists() {
         fs::remove_file(&cache_path).ok();
     }
-    Ok(header)
+    Ok(next)
 }
 
 fn build_index(active: Vec<ActiveDoc<'_>>) -> Result<(Vec<u8>, Vec<Block>, u32)> {
@@ -1220,7 +1480,8 @@ pub(crate) fn acquire_store_lock(path: &Path) -> Result<File> {
         .write(true)
         .open(lock_path(path))
         .with_context(|| format!("open lock {}", lock_path(path).display()))?;
-    file.lock_exclusive()?;
+    file.lock_exclusive()
+        .with_context(|| format!("lock {}", lock_path(path).display()))?;
     Ok(file)
 }
 
@@ -1239,30 +1500,59 @@ pub(crate) fn encode_header(header: &Header) -> [u8; HEADER_LEN] {
     bytes[64..72].copy_from_slice(&header.data_start.to_le_bytes());
     bytes[72..80].copy_from_slice(&header.tail_start.to_le_bytes());
     bytes[80..88].copy_from_slice(&header.doc_count.to_le_bytes());
+    bytes[88..96].copy_from_slice(&header.generation.to_le_bytes());
+    bytes[96..100].copy_from_slice(&header.flags.to_le_bytes());
     let hash = xxh3_64(&bytes[0..120]);
     bytes[120..128].copy_from_slice(&hash.to_le_bytes());
     bytes
 }
 
-fn decode_header(data: &[u8]) -> Result<Header> {
-    if data.len() < HEADER_LEN || &data[0..4] != MAGIC || data[4] != VERSION {
+fn decode_header_at(data: &[u8], offset: usize) -> Result<Header> {
+    let end = offset
+        .checked_add(HEADER_LEN)
+        .context("header offset overflow")?;
+    if end > data.len() || &data[offset..offset + 4] != MAGIC || data[offset + 4] != VERSION {
         bail!("bad cm header");
     }
-    if xxh3_64(&data[0..120]) != u64::from_le_bytes(data[120..128].try_into().unwrap()) {
+    let bytes = &data[offset..end];
+    if xxh3_64(&bytes[0..120]) != u64::from_le_bytes(bytes[120..128].try_into().unwrap()) {
         bail!("header XXH3 mismatch");
     }
     Ok(Header {
-        created_at: u64::from_le_bytes(data[8..16].try_into().unwrap()),
-        block_table_off: u64::from_le_bytes(data[16..24].try_into().unwrap()),
-        block_count: u64::from_le_bytes(data[24..32].try_into().unwrap()),
-        index_off: u64::from_le_bytes(data[32..40].try_into().unwrap()),
-        index_len: u64::from_le_bytes(data[40..48].try_into().unwrap()),
-        index_raw_len: u64::from_le_bytes(data[48..56].try_into().unwrap()),
-        index_hash: u64::from_le_bytes(data[56..64].try_into().unwrap()),
-        data_start: u64::from_le_bytes(data[64..72].try_into().unwrap()),
-        tail_start: u64::from_le_bytes(data[72..80].try_into().unwrap()),
-        doc_count: u64::from_le_bytes(data[80..88].try_into().unwrap()),
+        created_at: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        block_table_off: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+        block_count: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+        index_off: u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+        index_len: u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+        index_raw_len: u64::from_le_bytes(bytes[48..56].try_into().unwrap()),
+        index_hash: u64::from_le_bytes(bytes[56..64].try_into().unwrap()),
+        data_start: u64::from_le_bytes(bytes[64..72].try_into().unwrap()),
+        tail_start: u64::from_le_bytes(bytes[72..80].try_into().unwrap()),
+        doc_count: u64::from_le_bytes(bytes[80..88].try_into().unwrap()),
+        generation: u64::from_le_bytes(bytes[88..96].try_into().unwrap()),
+        flags: u32::from_le_bytes(bytes[96..100].try_into().unwrap()),
     })
+}
+
+fn read_current_header_with_slot(data: &[u8]) -> Result<(Header, usize)> {
+    let first = decode_header_at(data, 0);
+    if let Ok(header) = first {
+        if header.flags & HEADER_FLAG_DUAL == 0 {
+            return Ok((header, 0));
+        }
+        if let Ok(second) = decode_header_at(data, HEADER_SLOT) {
+            if second.generation > header.generation {
+                return Ok((second, HEADER_SLOT));
+            }
+        }
+        return Ok((header, 0));
+    }
+    let header = decode_header_at(data, HEADER_SLOT)?;
+    Ok((header, HEADER_SLOT))
+}
+
+pub(crate) fn read_current_header(data: &[u8]) -> Result<Header> {
+    read_current_header_with_slot(data).map(|(header, _)| header)
 }
 
 fn read_u32(data: &[u8], offset: usize) -> u32 {
@@ -1290,7 +1580,7 @@ fn align8(value: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{memory_payload, new_memory};
+    use crate::model::{build_merged, memory_payload, new_memory};
     use std::time::Duration;
 
     fn temp_store_path() -> PathBuf {
@@ -1312,6 +1602,8 @@ mod tests {
             data_start: HEADER_LEN as u64,
             tail_start: HEADER_LEN as u64,
             doc_count: 0,
+            generation: 0,
+            flags: 0,
         };
         fs::write(&path, encode_header(&header)).expect("write header");
         reindex_file(&path).expect("reindex empty store");
@@ -1361,7 +1653,7 @@ mod tests {
         let path = empty_indexed_store();
         let lock = acquire_store_lock(&path).expect("hold store lock");
         let checkpoint_path = path.clone();
-        let handle = std::thread::spawn(move || checkpoint_file(&checkpoint_path));
+        let handle = std::thread::spawn(move || checkpoint_file(&checkpoint_path, false));
         std::thread::sleep(Duration::from_millis(150));
         assert!(
             !handle.is_finished(),
@@ -1396,6 +1688,273 @@ mod tests {
         cleanup(&path);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn append_does_not_block_concurrent_header_reads() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let path = empty_indexed_store();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let reader_path = path.clone();
+        let reader_stop = Arc::clone(&stopping);
+        let reader_started = Arc::clone(&started);
+        let reader = std::thread::spawn(move || {
+            reader_started.store(true, Ordering::Release);
+            let mut failures = Vec::new();
+            while !reader_stop.load(Ordering::Acquire) {
+                if let Err(error) = read_header_file(&reader_path) {
+                    failures.push(format!("{error:#}"));
+                    break;
+                }
+            }
+            failures
+        });
+        while !started.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        append_record(&path, T_MEMORY, &vec![7u8; 8 * 1024 * 1024], true).expect("append");
+        stopping.store(true, Ordering::Release);
+        let failures = reader.join().expect("join reader");
+        assert!(
+            failures.is_empty(),
+            "header reads must not hit the writer's byte-range lock: {failures:?}"
+        );
+        cleanup(&path);
+    }
+
+    fn test_header(generation: u64, flags: u32) -> Header {
+        Header {
+            created_at: 1,
+            block_table_off: DUAL_HEADER_LEN as u64,
+            block_count: 0,
+            index_off: DUAL_HEADER_LEN as u64,
+            index_len: 1,
+            index_raw_len: 1,
+            index_hash: 0,
+            data_start: DUAL_HEADER_LEN as u64,
+            tail_start: DUAL_HEADER_LEN as u64,
+            doc_count: 0,
+            generation,
+            flags,
+        }
+    }
+
+    #[test]
+    fn header_selection_uses_newest_valid_slot() {
+        let mut data = vec![0u8; DUAL_HEADER_LEN];
+        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(3, HEADER_FLAG_DUAL)));
+        data[HEADER_SLOT..].copy_from_slice(&encode_header(&test_header(4, HEADER_FLAG_DUAL)));
+        let (header, slot) = read_current_header_with_slot(&data).expect("header B");
+        assert_eq!((header.generation, slot), (4, HEADER_SLOT));
+
+        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(5, HEADER_FLAG_DUAL)));
+        let (header, slot) = read_current_header_with_slot(&data).expect("header A");
+        assert_eq!((header.generation, slot), (5, 0));
+
+        data[HEADER_SLOT] = b'X';
+        let (header, slot) = read_current_header_with_slot(&data).expect("corrupt B fallback");
+        assert_eq!((header.generation, slot), (5, 0));
+
+        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(2, HEADER_FLAG_DUAL)));
+        data[HEADER_SLOT..].copy_from_slice(&encode_header(&test_header(4, HEADER_FLAG_DUAL)));
+        data[0] = b'X';
+        let (header, slot) = read_current_header_with_slot(&data).expect("corrupt A fallback");
+        assert_eq!((header.generation, slot), (4, HEADER_SLOT));
+
+        data[HEADER_SLOT] = b'X';
+        assert!(read_current_header_with_slot(&data).is_err());
+    }
+
+    #[test]
+    fn reindex_preserves_merged_record_flag() {
+        let path = empty_indexed_store();
+        let first = new_memory(
+            "fact",
+            "test",
+            "first",
+            "first body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        let second = new_memory(
+            "fact",
+            "test",
+            "second",
+            "second body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
+        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
+        reindex_file(&path).expect("reindex sources");
+        let merged = build_merged(
+            &first,
+            &[first.id.clone(), second.id.clone()],
+            "merged body",
+            "manual",
+            1.0,
+        );
+        append_record(&path, T_MERGE, &memory_payload(&merged), true).expect("merge");
+        reindex_file(&path).expect("reindex merge");
+
+        let mut store = Store::open(&path).expect("open");
+        let memories = store.scan_page(usize::MAX, 0).expect("scan");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, merged.id);
+        assert!(memories[0].merged);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn checkpoint_recovers_partial_index_append() {
+        let path = empty_indexed_store();
+        let memory = new_memory(
+            "fact",
+            "test",
+            "tail",
+            "tail body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        let payload = memory_payload(&memory);
+        append_record(&path, T_MEMORY, &payload, true).expect("append");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open partial marker");
+        file.write_all(INDEX_MARKER).expect("write partial marker");
+        file.sync_all().expect("sync partial marker");
+
+        let header = checkpoint_file(&path, true).expect("checkpoint repairs partial marker");
+        assert_eq!(header.doc_count, 0);
+        let data = fs::read(&path).expect("read repaired");
+        assert!(!data.windows(INDEX_MARKER.len()).any(|w| w == INDEX_MARKER));
+        assert_eq!(verify_full(&path).expect("verify repaired"), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn records_appended_after_partial_index_are_readable_and_survive_checkpoint() {
+        let path = empty_indexed_store();
+        let first = new_memory(
+            "fact",
+            "test",
+            "first",
+            "first body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
+        let header = read_header_file(&path).expect("header");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open partial marker");
+        file.write_all(INDEX_MARKER).expect("write marker");
+        file.write_all(&(1024u64).to_le_bytes())
+            .expect("write partial index length");
+        file.write_all(b"partial index bytes")
+            .expect("write partial index");
+        file.sync_all().expect("sync partial index");
+        drop(file);
+        let second = new_memory(
+            "fact",
+            "test",
+            "second",
+            "second body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
+
+        let data = fs::read(&path).expect("read store");
+        let tail = read_records_from(&data, header.tail_start as usize).expect("tail");
+        assert_eq!(
+            tail.len(),
+            2,
+            "records after a partial index must stay visible"
+        );
+        let store = Store::open(&path).expect("open store");
+        assert_eq!(store.tail_view().expect("tail view").memories.len(), 2);
+
+        let repaired = checkpoint_file(&path, true).expect("checkpoint repairs partial index");
+        assert_eq!(repaired.doc_count, 0);
+        assert_eq!(verify_full(&path).expect("verify repaired"), 2);
+        let data = fs::read(&path).expect("read repaired");
+        assert!(!data.windows(INDEX_MARKER.len()).any(|w| w == INDEX_MARKER));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn records_after_short_partial_marker_prefix_are_recovered() {
+        for prefix_len in [1usize, 4, 8, 12] {
+            let path = empty_indexed_store();
+            let header = read_header_file(&path).expect("header");
+            let first = new_memory(
+                "fact",
+                "test",
+                "first",
+                "first body",
+                "audit",
+                0.9,
+                Vec::new(),
+                None,
+                None,
+            );
+            append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open partial marker");
+            let mut partial = INDEX_MARKER[..prefix_len.min(INDEX_MARKER.len())].to_vec();
+            partial.resize(prefix_len, 0);
+            file.write_all(&partial).expect("write marker prefix");
+            file.sync_all().expect("sync marker prefix");
+            drop(file);
+            let second = new_memory(
+                "fact",
+                "test",
+                "second",
+                "second body",
+                "audit",
+                0.9,
+                Vec::new(),
+                None,
+                None,
+            );
+            append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
+
+            let data = fs::read(&path).expect("read store");
+            let tail = read_records_from(&data, header.tail_start as usize).expect("tail");
+            assert_eq!(
+                tail.len(),
+                2,
+                "marker prefix length {prefix_len} must not hide later records"
+            );
+            let repaired = checkpoint_file(&path, true).expect("checkpoint repairs marker prefix");
+            assert_eq!(repaired.doc_count, 0);
+            assert_eq!(verify_full(&path).expect("verify repaired"), 2);
+            cleanup(&path);
+        }
+    }
+
     #[test]
     fn checkpoint_rejects_truncated_or_garbage_tail() {
         let path = empty_indexed_store();
@@ -1408,7 +1967,7 @@ mod tests {
             .set_len(len - 1)
             .expect("truncate");
         let before = fs::read(&path).expect("read before");
-        let error = checkpoint_file(&path).expect_err("truncated tail must fail");
+        let error = checkpoint_file(&path, false).expect_err("truncated tail must fail");
         assert!(format!("{error:#}").contains("truncated"), "{error:#}");
         assert_eq!(fs::read(&path).expect("read after"), before);
         assert!(!path.with_file_name("cm.tmp").exists());
@@ -1421,7 +1980,7 @@ mod tests {
             .expect("open for garbage");
         file.write_all(b"garbage!").expect("write garbage");
         file.sync_all().expect("sync garbage");
-        let error = checkpoint_file(&garbage_path).expect_err("garbage tail must fail");
+        let error = checkpoint_file(&garbage_path, false).expect_err("garbage tail must fail");
         assert!(format!("{error:#}").contains("offset"), "{error:#}");
         assert!(!garbage_path.with_file_name("cm.tmp").exists());
         cleanup(&path);

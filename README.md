@@ -46,7 +46,7 @@ cm init [--file cm] [--empty]
 cm append --file cm --json '<json>' [--durable]
 cm import --file cm < records.jsonl
 cm export --file cm [--format cmx|jsonl]
-cm checkpoint [--file cm]
+cm checkpoint [--in-place] [--file cm]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
@@ -78,17 +78,22 @@ Import a full export into an empty store. Append-only JSONL import also accepts
 ## COW checkpoint
 
 ```bash
-cm checkpoint --file cm
+cm checkpoint --file cm              # compact checkpoint: stable file size
+cm checkpoint --in-place --file cm   # append index generation: fastest
 ```
 
-`checkpoint` is the copy-on-write path: it copies existing compressed data
-blocks unchanged, applies tail tombstones/merges/supersedes to the index active
-bitset, and atomically replaces `cm`. It does **not** compact dead blocks or
-reclaim their space; use `cm reindex` for that. `checkpoint` is for fast,
-crash-safe index-state commits; `reindex` is for full compaction.
+Both modes apply tail tombstones/merges/supersedes to the index active bitset
+without recompressing data blocks. They do **not** compact dead blocks; use
+`cm reindex` for full compaction and space reclamation.
 
-On a 1,000,030-record store, the block-reuse checkpoint is roughly 1.1s instead
-of minutes for a full reindex. A 10,000-record checkpoint is roughly 22ms.
+- `checkpoint` copies immutable compressed blocks into a new file and resets the
+  index generation. It is space-stable: 10k ~28ms, 1M ~1.12s.
+- `checkpoint --in-place` appends a new index generation and flips a dual header
+  slot. It is faster: 10k ~17ms, 1M ~0.8s. The file grows by the compressed
+  index per generation (10k ~334KB, 1M ~43MB) until `cm reindex` compacts it.
+- Old single-header files migrate once on their first checkpoint; subsequent
+  checkpoints can use in-place generations.
+- `cm.lock` is an advisory writer lock; readers remain lock-free.
 
 ## Agent skill
 
@@ -121,7 +126,7 @@ No-answer  0.667 (default); 1.000 with --min-score 3.0
 - Single memory file `cm`; optional disposable `cm.lru` cache and `cm.lock` writer lock.
 - Append-only data log with 64 KiB compressed blocks.
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
-- `cm checkpoint` reuses immutable compressed blocks and commits a new index state by atomic rename.
+- `cm checkpoint` reuses immutable compressed blocks; `--in-place` keeps old index generations and commits via dual headers.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded LFU/LRU block cache.
@@ -139,9 +144,10 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 | `search --top 8` | ~12 ms |
 
 `checkpoint` (cold process, 1M records) measured p50 ~1.12s / p95 ~1.13s; 10k
-records measured p50 ~22ms / p95 ~25ms. A full `reindex` of the same 1M store
-is roughly 3m19s. Numbers are workload-dependent; use `cm verify` after bulk
-changes.
+records measured p50 ~28ms / p95 ~29ms. `checkpoint --in-place` measured p50
+~0.78s / 1M and ~17ms / 10k, at the cost of one compressed index generation per
+changeset. A full `reindex` of the same 1M store is roughly 3m19s. Numbers are
+workload-dependent; use `cm verify` after bulk changes.
 
 ## Development
 
