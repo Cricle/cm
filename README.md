@@ -30,14 +30,19 @@ cm status --file cm
 
 ```text
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo]
-cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800]
+cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800] [--full]
 cm forget --file cm --id <id>
 cm status [--file cm]
 cm doctor [--strict] [--file cm]
 cm skill [--json] [--install] [--check]
 ```
 
-`recall` returns at most 3 compact memories and respects the token budget. `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a problem. Read commands may create or update the disposable `cm.lru` cache; `cm` remains unchanged.
+`recall` returns at most 3 memories and respects the token budget. The first hit is
+full text; additional hits are query-focused snippets, so 2–3 related memories
+usually fit in 800 tokens. Use `--full` for complete text on every hit. `doctor`
+emits one compact JSON health line; `--strict` exits 1 when it reports a problem.
+Read commands may create or update the disposable `cm.lru` cache; `cm` remains
+unchanged.
 
 ## Advanced commands
 
@@ -126,12 +131,11 @@ On the `pi` fixture (18 records, 22 positive + 3 negative queries):
 | Mode | Recall | MRR | Hit@1 | No-answer |
 |---|---:|---:|---:|---:|
 | `search --top 5` | 0.985 | 0.955 | 0.909 | 0.667 |
-| `recall --budget 800 --max-items 3` | 0.689 | 0.909 | 0.909 | 0.667 |
+| `recall --budget 800 --max-items 3` | 0.939 | 0.955 | 0.909 | 0.667 |
 
-The `search` number is retrieval@5, not the default recall command; long fixture
-records consume the 800-token budget and often leave room for only one result.
-The harder paraphrased set in `eval/queries_hard.jsonl` gives `search@5` 0.875
-and `recall@3` 0.333.
+The `search` number is retrieval@5; the recall row uses the actual command with
+anchor-full plus query-snippet packing. The harder paraphrased set in
+`eval/queries_hard.jsonl` gives `search@5` 0.875 and `recall@3` 0.771.
 
 These are small lexical fixtures, not an end-to-end answer benchmark: the
 fixture has only 18 records, many queries share identifiers with the expected

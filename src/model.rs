@@ -392,6 +392,39 @@ pub(crate) fn preview(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Query-focused excerpt used by the compact recall projection. It keeps the
+/// first matching query term in view and falls back to the text prefix.
+pub(crate) fn memory_snippet(memory: &Memory, query: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if memory.text.chars().count() <= max_chars {
+        return memory.text.clone();
+    }
+    let lower = memory.text.to_lowercase();
+    let mut matched: Option<usize> = None;
+    for token in tokenize(query) {
+        if token.chars().count() < 2 {
+            continue;
+        }
+        if let Some(position) = lower.find(&token) {
+            matched = Some(matched.map_or(position, |best| best.min(position)));
+        }
+    }
+    let byte_start = matched.unwrap_or(0);
+    let char_start = memory.text[..byte_start].chars().count();
+    let start = char_start.saturating_sub(max_chars / 3);
+    let mut snippet: String = memory.text.chars().skip(start).take(max_chars).collect();
+    let total = memory.text.chars().count();
+    if start > 0 {
+        snippet.insert(0, '…');
+    }
+    if start + max_chars < total {
+        snippet.push('…');
+    }
+    snippet
+}
+
 pub(crate) fn cmx_line(memory: &Memory) -> String {
     format!(
         "CM1{}	{}	{}	{}	{}	{}	{:.2}	{}	{}	{}	{}",

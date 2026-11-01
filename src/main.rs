@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::model::{
-    build_merged, cmx_line, kind_id, memory_payload, minhash_signature, minhash_similarity,
-    new_memory, pair_similarity, parse_ids, preview, Dsu, KINDS,
+    build_merged, cmx_line, kind_id, memory_payload, memory_snippet, minhash_signature,
+    minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu, KINDS,
 };
 use crate::store::{
     append_record, encode_header, read_header_file, reindex_file, Header, Store, HEADER_LEN,
@@ -182,6 +182,7 @@ struct ContextOut {
     query: String,
     budget: usize,
     estimated_tokens: usize,
+    compact: bool,
     memories: Vec<MemoryOut>,
 }
 
@@ -270,6 +271,7 @@ fn run() -> Result<()> {
                 arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
                 arg_usize(&args, "--max-items", 3),
                 arg_f64(&args, "--min-score", 0.0),
+                !has_flag(&args, "--full"),
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
@@ -330,6 +332,7 @@ fn run() -> Result<()> {
                 arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
                 arg_usize(&args, "--max-items", 5),
                 arg_f64(&args, "--min-score", 0.0),
+                has_flag(&args, "--compact"),
             )
         }
         "similar" => {
@@ -797,6 +800,7 @@ fn cmd_context(
     format: String,
     max_items: usize,
     min_score: f64,
+    compact: bool,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
@@ -861,7 +865,21 @@ fn cmd_context(
         if selected.len() >= max_items {
             break;
         }
-        let line = cmx_line(&memory);
+        let mut projected = memory;
+        if compact {
+            if !selected.is_empty() {
+                let snippet = memory_snippet(&projected, query, 240);
+                projected.text = snippet;
+            } else {
+                let line = cmx_line(&projected);
+                let line_tokens = line.chars().count().div_ceil(4);
+                if estimated + line_tokens > budget {
+                    let snippet = memory_snippet(&projected, query, 240);
+                    projected.text = snippet;
+                }
+            }
+        }
+        let line = cmx_line(&projected);
         let line_tokens = line.chars().count().div_ceil(4);
         if estimated + line_tokens > budget && !selected.is_empty() {
             break;
@@ -870,7 +888,7 @@ fn cmd_context(
             continue;
         }
         estimated += line_tokens;
-        selected.push(memory);
+        selected.push(projected);
     }
 
     match format.as_str() {
@@ -887,6 +905,7 @@ fn cmd_context(
                     query: query.to_string(),
                     budget,
                     estimated_tokens: estimated,
+                    compact,
                     memories: selected.iter().map(MemoryOut::from).collect(),
                 })?
             );
