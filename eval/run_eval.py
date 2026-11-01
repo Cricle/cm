@@ -68,6 +68,9 @@ def main() -> int:
     parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("fixtures") / "pi.jsonl")
     parser.add_argument("--queries", type=Path, default=Path(__file__).with_name("queries.jsonl"))
     parser.add_argument("--top", type=int, default=5)
+    parser.add_argument("--mode", choices=["search", "recall"], default="search")
+    parser.add_argument("--budget", type=int, default=800)
+    parser.add_argument("--max-items", type=int, default=3)
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--json-out", type=Path, help="write full metrics JSON")
     args = parser.parse_args()
@@ -86,11 +89,35 @@ def main() -> int:
             query = item["query"]
             scope = item.get("scope")
             expected = item.get("expected", [])
-            cmd = [cm, "search", "--file", str(store), "--query", query, "--top", str(args.top), "--min-score", str(args.min_score)]
-            if scope:
-                cmd += ["--scope", scope]
-            payload = json.loads(run(cmd))
-            got = [c["id"] for c in payload.get("candidates", [])]
+            if args.mode == "recall":
+                cmd = [
+                    cm,
+                    "recall",
+                    "--file",
+                    str(store),
+                    "--query",
+                    query,
+                    "--budget",
+                    str(args.budget),
+                    "--max-items",
+                    str(args.max_items),
+                ]
+                if scope:
+                    cmd += ["--scope", scope]
+                payload = run(cmd)
+                got = []
+                for line in payload.splitlines():
+                    if line == "CMX/1" or not line.strip():
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) > 1:
+                        got.append(parts[1])
+            else:
+                cmd = [cm, "search", "--file", str(store), "--query", query, "--top", str(args.top), "--min-score", str(args.min_score)]
+                if scope:
+                    cmd += ["--scope", scope]
+                payload = json.loads(run(cmd))
+                got = [c["id"] for c in payload.get("candidates", [])]
             expected_set = set(expected)
             hits = [cid for cid in got if cid in expected_set]
             if expected:
@@ -133,6 +160,9 @@ def main() -> int:
             "hit_at_1": avg([d["hit_at_1"] for d in positive]),
             "no_answer_accuracy": avg([1.0 if d["no_answer"] else 0.0 for d in negative]),
             "top": args.top,
+            "mode": args.mode,
+            "budget": args.budget if args.mode == "recall" else None,
+            "max_items": args.max_items if args.mode == "recall" else None,
         }
 
     result = {"metrics": metrics, "details": details}

@@ -1,0 +1,10 @@
+{"query":"How does the system decide where to cut a conversation when one message is too large?","scope":"pi","expected":["74ede88715e85ef1dde2c82afb1e0dcb","4d250285ea4f728b5cb6d6296a3348c5","4239773e0aa3650f63dc64e96b62991b"]}
+{"query":"What is persisted before a crash so an append-only log can recover?","scope":"pi","expected":["af243cff575782548ef2952a08c7df2d","430a0eaaf993452824e2982321673ddf","a466547df6e7287d7a79be119621d6cf"]}
+{"query":"Where are document edits and revisions kept?","scope":"pi","expected":["4cf8caaa4ec219bef565959a3500d24b","e82ef888aa1b20f0464f1f8f1bda94fb","f9457287888269869cdf19e564638864"]}
+{"query":"How are prompt sections reconstructed after a restart?","scope":"pi","expected":["9b5537e29e807361aa9ee4cf2a0edad3","e70c92589dd67d0cba0b54ada472d5b9","07470b0a8b09846faf2e302b54cc8f55"]}
+{"query":"What replaces an old value in a context edit?","scope":"pi","expected":["819f2f47a626ffd999054fd2137d915b","144f1301d61727ccf037198859fa11fe"]}
+{"query":"How does token usage get invalidated?","scope":"pi","expected":["30aa6182ec4171e2113d45f72b9c5d5e","56ad933f81b98cba01a5fd45ab13b158","4a82e953c9366cca792e03c0555a99f6"]}
+{"query":"How is an oversized message handled during compaction?","scope":"pi","expected":["74ede88715e85ef1dde2c82afb1e0dcb","4d250285ea4f728b5cb6d6296a3348c5"]}
+{"query":"How do tools get replayed into the current prompt?","scope":"pi","expected":["e70c92589dd67d0cba0b54ada472d5b9","9b5537e29e807361aa9ee4cf2a0edad3"]}
+{"query":"How do I configure Prometheus alerts for Atlas?","scope":"pi","expected":[]}
+{"query":"What is the Kafka retention setting for Atlas?","scope":"pi","expected":[]}

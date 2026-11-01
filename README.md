@@ -114,14 +114,29 @@ installed by default to `.agents/skills/cm-memory`.
 
 ## Accuracy
 
-The repository includes a retrieval accuracy harness in [`eval/`](eval/). Current baseline on the `pi` fixture:
+The harness supports both retrieval and the actual recall command:
 
-```text
-Recall@5   0.985
-MRR        0.955
-Hit@1      0.909
-No-answer  0.667 (default); 1.000 with --min-score 3.0
+```bash
+python3 eval/run_eval.py --cm target/release/cm.exe --mode search
+python3 eval/run_eval.py --cm target/release/cm.exe --mode recall --budget 800
 ```
+
+On the `pi` fixture (18 records, 22 positive + 3 negative queries):
+
+| Mode | Recall | MRR | Hit@1 | No-answer |
+|---|---:|---:|---:|---:|
+| `search --top 5` | 0.985 | 0.955 | 0.909 | 0.667 |
+| `recall --budget 800 --max-items 3` | 0.689 | 0.909 | 0.909 | 0.667 |
+
+The `search` number is retrieval@5, not the default recall command; long fixture
+records consume the 800-token budget and often leave room for only one result.
+The harder paraphrased set in `eval/queries_hard.jsonl` gives `search@5` 0.875
+and `recall@3` 0.333.
+
+These are small lexical fixtures, not an end-to-end answer benchmark: the
+fixture has only 18 records, many queries share identifiers with the expected
+memories, and top-5 alone covers 5/18 of the store. Treat the numbers as
+regression checks, not as a general accuracy claim.
 
 ## Design
 
