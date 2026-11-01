@@ -673,6 +673,31 @@ fn cmd_search(
     min_trust: Option<String>,
     include_expired: bool,
 ) -> Result<()> {
+    let output = search_out(
+        path,
+        query,
+        top,
+        scope,
+        kind,
+        min_score,
+        min_trust,
+        include_expired,
+    )?;
+    outln!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_out(
+    path: &Path,
+    query: &str,
+    top: usize,
+    scope: Option<String>,
+    kind: Option<String>,
+    min_score: f64,
+    min_trust: Option<String>,
+    include_expired: bool,
+) -> Result<SearchOut> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
     let scope_id = scope.as_deref().and_then(|value| store.scope_id(value));
@@ -680,14 +705,10 @@ fn cmd_search(
         Some(value) => match kind_id(value) {
             Some(id) => Some(id),
             None => {
-                outln!(
-                    "{}",
-                    serde_json::to_string(&SearchOut {
-                        query: query.to_string(),
-                        candidates: Vec::new()
-                    })?
-                );
-                return Ok(());
+                return Ok(SearchOut {
+                    query: query.to_string(),
+                    candidates: Vec::new(),
+                });
             }
         },
         None => None,
@@ -700,9 +721,22 @@ fn cmd_search(
         bail!("invalid trust level {:?}", min_trust);
     }
     let now = crate::model::now_ms();
+    let mut hidden_docs = HashSet::new();
+    for id in &tail.hidden {
+        if let Some((doc_idx, _)) = store.find_doc(id)? {
+            hidden_docs.insert(doc_idx);
+        }
+    }
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if scope.is_none() || scope_id.is_some() {
-        for (doc_idx, score) in store.bm25(query, scope_id, kind_id, None, top.min(100))? {
+        for (doc_idx, score) in store.bm25(
+            query,
+            scope_id,
+            kind_id,
+            None,
+            Some(&hidden_docs),
+            top.min(100),
+        )? {
             let meta = store.doc_meta(doc_idx)?;
             let memory = store.doc_memory(&meta)?;
             if !tail.hidden.contains(&memory.id) {
@@ -735,14 +769,10 @@ fn cmd_search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     candidates.truncate(top);
-    outln!(
-        "{}",
-        serde_json::to_string(&SearchOut {
-            query: query.to_string(),
-            candidates
-        })?
-    );
-    Ok(())
+    Ok(SearchOut {
+        query: query.to_string(),
+        candidates,
+    })
 }
 
 fn trust_rank(trust: &str) -> i32 {
@@ -794,6 +824,7 @@ fn cmd_context(
             query,
             scope_id,
             kind_id,
+            None,
             None,
             top.saturating_mul(4).min(256),
         )? {
@@ -890,6 +921,7 @@ fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Resu
             Some(scope_id),
             None,
             target_idx,
+            None,
             top.min(100),
         )? {
             let meta = store.doc_meta(doc_idx)?;
@@ -1265,6 +1297,7 @@ fn cmd_consolidate(
             scope_id,
             kind,
             Some(*doc_idx),
+            None,
             top.min(100),
         )? {
             let Some(pos) = memories.iter().position(|(idx, _)| *idx == j) else {
@@ -1555,6 +1588,49 @@ mod tests {
             trust: Some("verified".to_string()),
             source_commit: None,
         }
+    }
+
+    #[test]
+    fn search_excludes_hidden_records_before_top_truncation() {
+        let dir = temp_store_dir();
+        let path = dir.join("cm");
+        cmd_init(&path, true).expect("init");
+        cmd_append_input(
+            &path,
+            &test_input("alpha alpha alpha", "alpha alpha alpha alpha"),
+            true,
+        )
+        .expect("high score record");
+        cmd_append_input(&path, &test_input("alpha", "alpha"), true).expect("low score record");
+        cmd_reindex(&path).expect("reindex");
+        let ids = {
+            let mut store = Store::open(&path).expect("open");
+            store
+                .scan_page(usize::MAX, 0)
+                .expect("scan")
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<Vec<_>>()
+        };
+        let before = search_out(&path, "alpha", 1, None, None, 0.0, None, false)
+            .expect("search before forget");
+        assert_eq!(before.candidates.len(), 1);
+        let hidden_id = before.candidates[0].id.clone();
+        let visible_id = ids
+            .into_iter()
+            .find(|id| id != &hidden_id)
+            .expect("visible record");
+
+        cmd_forget(&path, &hidden_id).expect("forget top hit");
+        let after = search_out(&path, "alpha", 1, None, None, 0.0, None, false)
+            .expect("search after forget");
+        assert_eq!(
+            after.candidates.len(),
+            1,
+            "a hidden top hit must not leave search empty"
+        );
+        assert_eq!(after.candidates[0].id, visible_id);
+        fs::remove_dir_all(&dir).ok();
     }
 
     fn test_active_total(path: &Path) -> u64 {

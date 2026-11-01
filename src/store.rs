@@ -451,6 +451,7 @@ impl Store {
         scope_id: Option<u32>,
         kind: Option<u8>,
         exclude: Option<u32>,
+        hidden_docs: Option<&HashSet<u32>>,
         limit: usize,
     ) -> Result<Vec<(u32, f64)>> {
         let ib = self.index();
@@ -471,6 +472,7 @@ impl Store {
                 let offset = postings_off + (start as usize + p) * 8;
                 let doc_idx = read_u32(ib, offset);
                 if exclude == Some(doc_idx)
+                    || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
                     || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
                 {
                     continue;
@@ -512,6 +514,7 @@ impl Store {
         scope_id: Option<u32>,
         kind: Option<u8>,
         exclude: Option<u32>,
+        hidden_docs: Option<&HashSet<u32>>,
         limit: usize,
     ) -> Result<Vec<(u32, f64)>> {
         let ib = self.index();
@@ -549,7 +552,7 @@ impl Store {
             return Ok(Vec::new());
         }
         if self.doc_count() <= 10_000 {
-            return self.bm25_all_terms(&terms, scope_id, kind, exclude, limit);
+            return self.bm25_all_terms(&terms, scope_id, kind, exclude, hidden_docs, limit);
         }
         term_info.sort_by_key(|(_, count, _)| *count);
         let (anchor_start, anchor_count, _) = term_info[0];
@@ -562,6 +565,7 @@ impl Store {
             let offset = postings_off + (anchor_start as usize + p) * 8;
             let doc_idx = read_u32(ib, offset);
             if exclude == Some(doc_idx)
+                || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
                 || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
             {
                 continue;
