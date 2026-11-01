@@ -28,11 +28,11 @@ A useful `cm` has three layers:
 
 1. **Project map** — purpose, stack, entrypoints, build/test, package layout.
 2. **Module maps** — responsibilities, key files/symbols, dependencies, limits.
-3. **Atomic pages** — one claim each: fact, decision, constraint, procedure,
-   or gotcha.
+3. **Wiki pages** — one topic each, with 2–4 tightly related claims: fact,
+   decision, constraint, procedure, or gotcha.
 
-Atomic pages should be 200–400 characters, carry `path:symbol@commit` evidence,
-and use a canonical subject such as:
+Pages should be 300–450 characters, carry `path:symbol@commit` evidence, and
+use a canonical subject such as:
 
 ```text
 <project>/<module>/<entity>/<aspect>
@@ -56,8 +56,9 @@ Not input:
 Required gates:
 
 1. every page has a source path/symbol and `source_commit`;
-2. one claim per page;
-3. independent verifier checks the claim against source;
+2. one topic per page, 2–4 related claims; split only when claims answer
+   different queries;
+3. independent verifier checks the claims against source;
 4. source anchors are repaired, not silently dropped;
 5. exact/near duplicates removed;
 6. `cm conflicts` and `cm doctor --strict` pass before publishing.
@@ -66,7 +67,7 @@ Required gates:
 
 - source coverage: 100%
 - unsupported claims: 0
-- average page length: 200–400 characters
+- average page length: 300–450 characters
 - exact duplicate rate: <1%
 - near-duplicate rate: <2%
 - blind answer test on held-out project questions; do not use the generator's
