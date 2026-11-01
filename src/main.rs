@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::model::{
-    build_merged, cmx_line, kind_id, memory_payload, memory_snippet, minhash_signature,
-    minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu, KINDS,
+    build_merged, cmx_line, estimate_tokens, kind_id, memory_payload, memory_snippet,
+    minhash_signature, minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu,
+    KINDS,
 };
 use crate::store::{
     append_record, encode_header, read_header_file, reindex_file, Header, Store, HEADER_LEN,
@@ -872,7 +873,7 @@ fn cmd_context(
                 projected.text = snippet;
             } else {
                 let line = cmx_line(&projected);
-                let line_tokens = line.chars().count().div_ceil(4);
+                let line_tokens = estimate_tokens(&line);
                 if estimated + line_tokens > budget {
                     let snippet = memory_snippet(&projected, query, 240);
                     projected.text = snippet;
@@ -880,7 +881,7 @@ fn cmd_context(
             }
         }
         let line = cmx_line(&projected);
-        let line_tokens = line.chars().count().div_ceil(4);
+        let line_tokens = estimate_tokens(&line);
         if estimated + line_tokens > budget && !selected.is_empty() {
             break;
         }

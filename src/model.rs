@@ -392,6 +392,19 @@ pub(crate) fn preview(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Conservative token estimate for recall budgets. CJK characters are counted
+/// as one token; other non-space characters as a quarter token.
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0.0f64;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            continue;
+        }
+        tokens += if is_cjk(character) { 1.0 } else { 0.25 };
+    }
+    tokens.ceil() as usize
+}
+
 /// Query-focused excerpt used by the compact recall projection. It keeps the
 /// first matching query term in view and falls back to the text prefix.
 pub(crate) fn memory_snippet(memory: &Memory, query: &str, max_chars: usize) -> String {
@@ -817,5 +830,12 @@ mod tests {
         assert!(tokens.iter().any(|token| token == "topic"));
         assert!(tokens.iter().any(|token| token == "使用"));
         assert!(tokens.iter().any(|token| token == "memory"));
+    }
+
+    #[test]
+    fn token_estimate_counts_cjk_character_wise() {
+        assert_eq!(estimate_tokens("hello world"), 3);
+        assert_eq!(estimate_tokens("使用记忆"), 4);
+        assert_eq!(estimate_tokens("hello 使用"), 4);
     }
 }
