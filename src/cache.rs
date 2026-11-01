@@ -249,17 +249,21 @@ fn temp_cache_path(path: &Path) -> PathBuf {
 fn layout(index_len: usize) -> Result<(usize, usize, usize, usize, usize)> {
     let size = (index_len + HOT_BUDGET).clamp(MIN_CACHE_SIZE, MAX_CACHE_SIZE);
     let table_off = align8(CACHE_HEADER + index_len);
-    let mut cap = MAX_ENTRIES;
+    let available = size.saturating_sub(table_off);
+    // Use the hot budget for slots, not for unused table entries. The old
+    // loop capped slots at a power-of-two table size and left half of the
+    // hot budget unused for a 1M store.
+    let mut cap = (available / (ENTRY_SIZE + SLOT_SIZE)).clamp(1, MAX_ENTRIES);
     loop {
         let table_end = align8(table_off + cap * ENTRY_SIZE);
-        if table_end + cap * SLOT_SIZE <= size {
-            let slots = (size - table_end) / SLOT_SIZE;
+        let slots = (size.saturating_sub(table_end)) / SLOT_SIZE;
+        if slots >= cap {
             return Ok((size, table_off, cap, table_end, slots));
         }
         if cap <= 1 {
             bail!("index too large for cache");
         }
-        cap /= 2;
+        cap -= 1;
     }
 }
 
@@ -323,6 +327,13 @@ fn write_u64(data: &mut [u8], offset: usize, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_uses_all_hot_slots() {
+        let (size, _table_off, cap, table_end, slots) = layout(105_764_624).expect("layout");
+        assert_eq!(cap, slots);
+        assert!(table_end + slots * SLOT_SIZE <= size);
+    }
 
     #[test]
     fn cache_create_reopen_and_memory_fallback() {
