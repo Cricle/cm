@@ -20,7 +20,6 @@ pub(crate) const HEADER_LEN: usize = 128;
 pub(crate) const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
 pub(crate) const HEADER_SLOT: usize = HEADER_LEN;
 pub(crate) const HEADER_FLAG_DUAL: u32 = 1;
-const HEADER_FLAG_PAGE_INDEX: u32 = 2;
 const PAGE_SIZE: usize = 64 * 1024;
 const PAGE_MAGIC: &[u8; 8] = b"CMPG1\0\0\0";
 const PAGE_ENTRY: usize = 24;
@@ -380,27 +379,13 @@ fn read_doc_meta_page(
     }
     Ok(())
 }
-enum IndexStorage {
-    /// Legacy single-blob index, already decompressed into memory.
-    Blob(Vec<u8>),
-    /// Page-index: only the page table is loaded up front.
-    Paged(PagedIndex),
-}
-
-/// Read-only view of the logical (uncompressed) index. Callers use
-/// `read_u32`/`read_u64`/`read_bytes` and stay independent of whether the
-/// store uses a page index or the legacy compressed single blob.
+/// Read-only view of the logical (uncompressed) index. Only the page table is
+/// resident; individual 64 KiB pages are loaded on demand.
 pub(crate) struct Index {
-    data: IndexStorage,
+    paged: PagedIndex,
 }
 
 impl Index {
-    fn from_blob(raw: Vec<u8>) -> Self {
-        Self {
-            data: IndexStorage::Blob(raw),
-        }
-    }
-
     fn from_pages(
         mmap: Arc<Mmap>,
         header: &Header,
@@ -419,7 +404,7 @@ impl Index {
             bail!("page index has wrong page count");
         }
         Ok(Self {
-            data: IndexStorage::Paged(PagedIndex {
+            paged: PagedIndex {
                 mmap,
                 entries: Arc::new(entries),
                 cache: RefCell::new(PageCache::new()),
@@ -427,22 +412,12 @@ impl Index {
                 disk_cache,
                 len,
                 hash: header.index_hash,
-            }),
+            },
         })
     }
 
     pub(crate) fn len(&self) -> usize {
-        match &self.data {
-            IndexStorage::Blob(raw) => raw.len(),
-            IndexStorage::Paged(paged) => paged.len,
-        }
-    }
-
-    fn page(&self, page_id: usize) -> Result<Arc<[u8]>> {
-        match &self.data {
-            IndexStorage::Blob(_) => bail!("page access on single-blob index"),
-            IndexStorage::Paged(paged) => paged.load(page_id),
-        }
+        self.paged.len
     }
 
     fn check_range(&self, offset: usize, len: usize) -> Result<usize> {
@@ -456,28 +431,19 @@ impl Index {
     }
 
     fn read_array<const N: usize>(&self, offset: usize) -> Result<[u8; N]> {
-        let end = self.check_range(offset, N)?;
-        match &self.data {
-            IndexStorage::Blob(raw) => {
-                let mut out = [0u8; N];
-                out.copy_from_slice(&raw[offset..end]);
-                Ok(out)
-            }
-            IndexStorage::Paged(paged) => {
-                let page_id = offset / PAGE_SIZE;
-                let in_page = offset % PAGE_SIZE;
-                let page = paged.load(page_id)?;
-                if in_page + N <= page.len() {
-                    let mut out = [0u8; N];
-                    out.copy_from_slice(&page[in_page..in_page + N]);
-                    Ok(out)
-                } else {
-                    let bytes = self.read_bytes(offset, N)?;
-                    let mut out = [0u8; N];
-                    out.copy_from_slice(&bytes);
-                    Ok(out)
-                }
-            }
+        self.check_range(offset, N)?;
+        let page_id = offset / PAGE_SIZE;
+        let in_page = offset % PAGE_SIZE;
+        let page = self.paged.load(page_id)?;
+        if in_page + N <= page.len() {
+            let mut out = [0u8; N];
+            out.copy_from_slice(&page[in_page..in_page + N]);
+            Ok(out)
+        } else {
+            let bytes = self.read_bytes(offset, N)?;
+            let mut out = [0u8; N];
+            out.copy_from_slice(&bytes);
+            Ok(out)
         }
     }
 
@@ -503,130 +469,39 @@ impl Index {
 
     pub(crate) fn read_bytes(&self, offset: usize, len: usize) -> Result<Vec<u8>> {
         let end = self.check_range(offset, len)?;
-        match &self.data {
-            IndexStorage::Blob(raw) => Ok(raw[offset..end].to_vec()),
-            IndexStorage::Paged(paged) => {
-                let mut out = Vec::with_capacity(len);
-                let mut pos = offset;
-                while pos < end {
-                    let page_id = pos / PAGE_SIZE;
-                    let page = paged.load(page_id)?;
-                    let in_page = pos % PAGE_SIZE;
-                    if in_page >= page.len() {
-                        bail!("index page {page_id} too short");
-                    }
-                    let take = (end - pos).min(page.len() - in_page);
-                    out.extend_from_slice(&page[in_page..in_page + take]);
-                    pos += take;
-                }
-                Ok(out)
+        let mut out = Vec::with_capacity(len);
+        let mut pos = offset;
+        while pos < end {
+            let page_id = pos / PAGE_SIZE;
+            let page = self.paged.load(page_id)?;
+            let in_page = pos % PAGE_SIZE;
+            if in_page >= page.len() {
+                bail!("index page {page_id} too short");
             }
+            let take = (end - pos).min(page.len() - in_page);
+            out.extend_from_slice(&page[in_page..in_page + take]);
+            pos += take;
         }
+        Ok(out)
     }
 
     /// Materialize the whole logical index. Only checkpoint/reindex paths use
     /// this; normal reads never copy the full index.
     pub(crate) fn to_vec(&self) -> Result<Vec<u8>> {
-        match &self.data {
-            IndexStorage::Blob(raw) => Ok(raw.clone()),
-            IndexStorage::Paged(paged) => {
-                let raw = self.read_bytes(0, paged.len)?;
-                if xxh3_64(&raw) != paged.hash {
-                    bail!("index hash mismatch");
-                }
-                Ok(raw)
-            }
+        let raw = self.read_bytes(0, self.paged.len)?;
+        if xxh3_64(&raw) != self.paged.hash {
+            bail!("index hash mismatch");
         }
-    }
-
-    pub(crate) fn cursor(&self, offset: usize) -> IndexCursor<'_> {
-        IndexCursor::new(self, offset)
-    }
-
-    fn is_paged(&self) -> bool {
-        matches!(self.data, IndexStorage::Paged(_))
+        Ok(raw)
     }
 
     pub(crate) fn doc_meta_batch(&self, indices: &[u32]) -> Result<Vec<DocMeta>> {
         let docs_off = self.read_u64(24)? as usize;
-        match &self.data {
-            IndexStorage::Blob(raw) => indices
-                .iter()
-                .map(|&idx| {
-                    let offset = docs_off + idx as usize * DOC_SIZE;
-                    let end = self.check_range(offset, DOC_SIZE)?;
-                    Ok(parse_doc_meta(&raw[offset..end]))
-                })
-                .collect(),
-            IndexStorage::Paged(paged) => {
-                for &idx in indices {
-                    let offset = docs_off + idx as usize * DOC_SIZE;
-                    self.check_range(offset, DOC_SIZE)?;
-                }
-                paged.doc_meta_batch(docs_off, indices)
-            }
+        for &idx in indices {
+            let offset = docs_off + idx as usize * DOC_SIZE;
+            self.check_range(offset, DOC_SIZE)?;
         }
-    }
-}
-
-pub(crate) struct IndexCursor<'a> {
-    index: &'a Index,
-    offset: usize,
-    page_id: usize,
-    page: Option<Arc<[u8]>>,
-    page_end: usize,
-}
-
-impl<'a> IndexCursor<'a> {
-    fn new(index: &'a Index, offset: usize) -> Self {
-        Self {
-            index,
-            offset,
-            page_id: usize::MAX,
-            page: None,
-            page_end: 0,
-        }
-    }
-
-    pub(crate) fn byte(&mut self) -> Result<u8> {
-        if self.offset >= self.index.len() {
-            bail!("index cursor out of bounds");
-        }
-        if let IndexStorage::Blob(raw) = &self.index.data {
-            let byte = raw[self.offset];
-            self.offset += 1;
-            return Ok(byte);
-        }
-        if self.page.is_none() || self.offset >= self.page_end {
-            let page_id = self.offset / PAGE_SIZE;
-            let page = self.index.page(page_id)?;
-            self.page_id = page_id;
-            self.page_end = (page_id + 1) * PAGE_SIZE;
-            self.page = Some(page);
-        }
-        let page = self.page.as_ref().expect("page loaded");
-        let in_page = self.offset - self.page_id * PAGE_SIZE;
-        let byte = *page
-            .get(in_page)
-            .ok_or_else(|| anyhow!("index cursor beyond page"))?;
-        self.offset += 1;
-        Ok(byte)
-    }
-
-    pub(crate) fn varint(&mut self) -> Result<usize> {
-        let mut value = 0usize;
-        let mut shift = 0u32;
-        loop {
-            let byte = self.byte()?;
-            value |= ((byte & 0x7F) as usize) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(value);
-            }
-            shift += 7;
-            if shift >= usize::BITS {
-                bail!("posting varint overflow");
-            }
-        }
+        self.paged.doc_meta_batch(docs_off, indices)
     }
 }
 
@@ -740,25 +615,6 @@ fn read_index_pages(mmap: &[u8], header: &Header) -> Result<Vec<u8>> {
     Ok(raw)
 }
 
-fn read_index_raw(mmap: &[u8], header: &Header) -> Result<Vec<u8>> {
-    if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
-        return read_index_pages(mmap, header);
-    }
-    let start = header.index_off as usize;
-    let end = start
-        .checked_add(header.index_len as usize)
-        .context("index offset overflow")?;
-    if end > mmap.len() {
-        bail!("index out of bounds");
-    }
-    let raw = zstd::bulk::decompress(&mmap[start..end], header.index_raw_len as usize)
-        .context("decompress index")?;
-    if raw.len() != header.index_raw_len as usize || xxh3_64(&raw) != header.index_hash {
-        bail!("index hash mismatch");
-    }
-    Ok(raw)
-}
-
 #[allow(clippy::type_complexity)]
 fn page_layout(
     raw: &[u8],
@@ -793,8 +649,7 @@ impl Store {
         if header.block_count >= u64::from(INDEX_PAGE_KEY) {
             bail!("too many blocks for the cache key space");
         }
-        // Page-index stores load only the page table here. The legacy
-        // single-blob path decompresses the index once, as before.
+        // The page table is tiny; index pages themselves stay lazy.
         let cache = match Cache::open_existing(path, header.index_hash) {
             Some(cache) => cache,
             None => match Cache::create(path, header.index_hash) {
@@ -810,11 +665,7 @@ impl Store {
             },
         };
         let cache = Arc::new(Mutex::new(cache));
-        let index = if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
-            Index::from_pages(Arc::clone(&mmap), &header, Some(Arc::clone(&cache)))?
-        } else {
-            Index::from_blob(read_index_raw(&mmap[..], &header)?)
-        };
+        let index = Index::from_pages(Arc::clone(&mmap), &header, Some(Arc::clone(&cache)))?;
         Ok(Self {
             mmap,
             header,
@@ -1014,36 +865,21 @@ impl Store {
         if count == 0 {
             return Ok(postings);
         }
-        if ib.is_paged() {
-            // The varint cursor is convenient for the single-blob path, but
-            // per-byte page checks are expensive. For page indexes read the
-            // exact posting extent and decode it as a slice.
-            let begin = postings_off + start as usize;
-            let len = end.saturating_sub(start) as usize;
-            let bytes = ib.read_bytes(begin, len)?;
-            let mut cursor = 0usize;
-            let mut previous = 0u32;
-            for _ in 0..count {
-                let delta = take_varint_slice(&bytes, &mut cursor)? as u32;
-                let doc_idx = previous
-                    .checked_add(delta)
-                    .context("posting delta overflow")?;
-                let tf = take_varint_slice(&bytes, &mut cursor)? as u32;
-                postings.push((doc_idx, tf));
-                previous = doc_idx;
-            }
-        } else {
-            let mut cursor = ib.cursor(postings_off + start as usize);
-            let mut previous = 0u32;
-            for _ in 0..count {
-                let delta = cursor.varint()? as u32;
-                let doc_idx = previous
-                    .checked_add(delta)
-                    .context("posting delta overflow")?;
-                let tf = cursor.varint()? as u32;
-                postings.push((doc_idx, tf));
-                previous = doc_idx;
-            }
+        // Read the exact posting extent and decode it as a slice; per-byte
+        // page checks would be prohibitively expensive.
+        let begin = postings_off + start as usize;
+        let len = end.saturating_sub(start) as usize;
+        let bytes = ib.read_bytes(begin, len)?;
+        let mut cursor = 0usize;
+        let mut previous = 0u32;
+        for _ in 0..count {
+            let delta = take_varint_slice(&bytes, &mut cursor)? as u32;
+            let doc_idx = previous
+                .checked_add(delta)
+                .context("posting delta overflow")?;
+            let tf = take_varint_slice(&bytes, &mut cursor)? as u32;
+            postings.push((doc_idx, tf));
+            previous = doc_idx;
         }
         Ok(postings)
     }
@@ -1775,7 +1611,7 @@ pub(crate) fn verify_full(path: &Path) -> Result<u64> {
     let mmap = unsafe { Mmap::map(&file)? };
     let header = read_current_header(&mmap)?;
     if header.index_len > 0 {
-        let _ = read_index_raw(&mmap, &header)?;
+        let _ = read_index_pages(&mmap, &header)?;
     }
     let mut count = 0u64;
     for block_id in 0..header.block_count as u32 {
@@ -1819,7 +1655,7 @@ pub(crate) fn reindex_file(path: &Path) -> Result<Header> {
         tail_start: cursor as u64,
         doc_count: doc_count as u64,
         generation: 1,
-        flags: HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX,
+        flags: HEADER_FLAG_DUAL,
     };
     let tmp = temp_path(path);
     if tmp.exists() {
@@ -1953,7 +1789,7 @@ fn migrate_checkpoint(
         tail_start: cursor as u64,
         doc_count: old_header.doc_count,
         generation: 1,
-        flags: HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX,
+        flags: HEADER_FLAG_DUAL,
     };
     let tmp = temp_path(path);
     if tmp.exists() {
@@ -2024,9 +1860,6 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
     if !changed {
         return Ok(current);
     }
-    if current.flags & HEADER_FLAG_PAGE_INDEX == 0 {
-        return migrate_checkpoint(path, &store, current, index_raw);
-    }
 
     let table_start = current.index_off as usize;
     let table_end = table_start
@@ -2088,7 +1921,7 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
     next.index_raw_len = index_raw.len() as u64;
     next.index_hash = index_hash;
     next.generation = current.generation.saturating_add(1);
-    next.flags |= HEADER_FLAG_DUAL | HEADER_FLAG_PAGE_INDEX;
+    next.flags |= HEADER_FLAG_DUAL;
 
     let other = if slot == 0 { HEADER_SLOT } else { 0 };
     let mut header_file = OpenOptions::new().write(true).open(path)?;

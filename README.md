@@ -153,8 +153,8 @@ without recompressing data blocks. They do **not** compact dead blocks; use
 - In-place growth is proportional to dirty pages, not the whole index: 10k
   ~16KB per generation; 1M ~47KB per generation (one dirty 64KiB page + 39KB
   page table). Periodic `cm reindex` reclaims old pages.
-- Old single-header and single-blob indexes migrate on their first checkpoint;
-  subsequent checkpoints use page-level COW.
+- Every index is page-backed; there is one on-disk index format. A single-header
+  file is upgraded to dual headers on its first checkpoint.
 - `cm.lock` is an advisory writer lock; readers remain lock-free.
 
 ## Agent skill
