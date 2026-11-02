@@ -10,6 +10,8 @@ description: Use when a coding project contains a `cm` memory file, or when the 
 Use it when work spans sessions, depends on prior decisions, or the repository is
 large enough that re-discovery is costly. Skip it for trivial one-shot edits:
 measured short tasks paid 20–55% extra tokens/tools for no file-read savings.
+On a realistic architecture question, one `brief` cut tokens 62% and tool uses
+44%; the boundary is task size, not memory size.
 
 ## Locate
 

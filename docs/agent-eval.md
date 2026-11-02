@@ -55,6 +55,22 @@ overhead. `cm` is for cross-session continuity, accumulated decisions, and large
 repositories where re-discovery is expensive; it should be skipped for trivial
 one-shot edits.
 
+## Realistic read-only A/B
+
+Same model, same question: explain cache eviction, scope/task affinity,
+cache-stats, source anchors, and audit with exact file/symbol citations.
+
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| with cm brief | 374,808 | 19 | 104.0s | 3 |
+| without cm | 986,555 | 34 | 207.1s | 5 |
+
+`cm` cut tokens by **62.0%**, tool uses by **44.1%**, and wall time by **49.8%**.
+This is the intended profile: on a non-trivial task in a real repository, one
+brief replaces enough discovery turns to pay for itself. The boundary is task
+size, not memory size.
+
+
 ## Why it is pure overhead
 
 A follow-up cache_bug run replaced the ritual `brief` + `recall` + `remember` +

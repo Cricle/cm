@@ -96,3 +96,18 @@ A session-start `brief` is only net positive when it replaces at least two
 discovery/read turns, which requires prior context not already in the prompt and
 navigational `path:symbol` sources in a repository large enough to search.
 
+### Realistic read-only A/B
+
+Same model, asking how cache eviction, affinity, cache-stats, source anchors, and
+audit work, with exact file/symbol citations:
+
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| with cm brief | 374,808 | 19 | 104.0s | 3 |
+| without cm | 986,555 | 34 | 207.1s | 5 |
+
+One brief cut tokens by 62.0%, tool uses by 44.1%, and wall time by 49.8%. That
+is the intended use: non-trivial work in a real repository where discovery
+would otherwise cost multiple turns.
+
+
