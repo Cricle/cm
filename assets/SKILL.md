@@ -7,6 +7,10 @@ description: Use when a coding project contains a `cm` memory file, or when the 
 
 `cm` is one binary memory file. Keep the external loop small: remember, recall, forget.
 
+Use it when work spans sessions, depends on prior decisions, or the repository is
+large enough that re-discovery is costly. Skip it for trivial one-shot edits:
+measured short tasks paid 40–55% extra tokens/tools for no file-read savings.
+
 ## Locate
 
 ```bash
