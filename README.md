@@ -163,7 +163,7 @@ regression checks, not as a general accuracy claim.
 - The index uses 8-byte ID-hash slots and delta-varint postings; older index versions remain readable.
 - Header version byte remains `1`.
 - No SQLite or external database.
-- Hot ops use mmap and a bounded block cache with TinyLFU admission/aging + LFU/LRU victim selection; one-off scans do not evict repeatedly reused blocks.
+- Hot ops use mmap and a bounded block cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
 
 ### Compact schema and size
 
