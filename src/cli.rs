@@ -1483,8 +1483,9 @@ fn run_govern(
     }))
 }
 
-/// Relative paths reported by `git status --porcelain=v1 -z`, normalized to
-/// lowercase forward slashes so audit can match memory sources on any OS.
+/// Relative paths reported by `git status --porcelain=v1 -z -uall`, normalized
+/// to lowercase forward slashes. Paths are relative to the git repository root,
+/// so `audit --changed` expects `--root` to be that root.
 pub(crate) fn changed_paths(root: &Path) -> Result<HashSet<String>> {
     let output = std::process::Command::new("git")
         .arg("-C")
