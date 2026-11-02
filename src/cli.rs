@@ -2232,6 +2232,16 @@ fn brief_prompt(
         push_prompt_list(&mut out, "OPEN:", frame.get("open"));
         push_prompt_list(&mut out, "TOUCHES:", frame.get("touches"));
         push_prompt_list(&mut out, "NOTES:", frame.get("notes"));
+        if let Some(owner) = frame.get("owner").and_then(serde_json::Value::as_str) {
+            out.push_str("OWNER: ");
+            out.push_str(owner);
+            out.push('\n');
+        }
+        if let Some(lease) = frame.get("lease_until").and_then(serde_json::Value::as_u64) {
+            out.push_str("LEASE_UNTIL: ");
+            out.push_str(&lease.to_string());
+            out.push('\n');
+        }
     }
     out.push_str("QUERY: ");
     out.push_str(query);
