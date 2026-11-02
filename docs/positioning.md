@@ -24,8 +24,9 @@ index for source-grounded project knowledge, not a universal knowledge base.
 
 `cm.cache` is not a knowledge layer. It is a disposable, workspace-local
 working-set accelerator: scope affinity keeps the current project hot, task
-affinity keeps the current work item hot, and query results are prefetched.
-Nothing in the cache is authoritative; deleting it only costs a cold start.
+tags identify the current work item and break eviction ties, and query results
+are prefetched. Nothing in the cache is authoritative; deleting it only costs a
+cold start.
 
 ## Memory shape
 

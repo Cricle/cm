@@ -24,21 +24,56 @@ use model::*;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use store::*;
 
 fn cached_block_tags(store_path: &Path, block_id: u32) -> Option<(u32, u32)> {
+    cached_entry(store_path, block_id).map(|(_, scope, task)| (scope, task))
+}
+
+fn cached_entry(store_path: &Path, key: u32) -> Option<(u32, u32, u32)> {
     let (_, table_off, cap, _, _, _) = cache::layout().expect("cache layout");
     let data = fs::read(store_path.with_file_name("cm.cache")).expect("read cache");
     for index in 0..cap {
-        let offset = table_off + index * 32;
+        let offset = table_off + index * 48;
         let id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
         let len = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
-        if id == block_id && len > 0 {
+        if id == key && len > 0 {
             let scope = u32::from_le_bytes(data[offset + 24..offset + 28].try_into().unwrap());
             let task = u32::from_le_bytes(data[offset + 28..offset + 32].try_into().unwrap());
-            return Some((scope, task));
+            return Some((id, scope, task));
+        }
+    }
+    None
+}
+
+fn cached_keys(store_path: &Path) -> Vec<u32> {
+    let (_, table_off, cap, _, _, _) = cache::layout().expect("cache layout");
+    let data = fs::read(store_path.with_file_name("cm.cache")).expect("read cache");
+    (0..cap)
+        .filter_map(|index| {
+            let offset = table_off + index * 48;
+            let len = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
+            (len > 0).then(|| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()))
+        })
+        .collect()
+}
+
+fn cached_slot(store_path: &Path, key: u32) -> Option<(usize, usize, usize)> {
+    let (_, table_off, cap, data_off, _, _) = cache::layout().expect("cache layout");
+    let data = fs::read(store_path.with_file_name("cm.cache")).expect("read cache");
+    for index in 0..cap {
+        let offset = table_off + index * 48;
+        let id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
+        if id == key && len > 0 {
+            let slot = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
+            return Some((
+                offset,
+                data_off + slot as usize * cache::SLOT_SIZE,
+                len as usize,
+            ));
         }
     }
     None
@@ -198,6 +233,53 @@ mod cache_tests {
             Some((scope, task_b)),
             "a global hit must not erase the working-set tag"
         );
+
+        let task_c = affinity_tag(Some("task-c"));
+        cache.set_affinity(None, Some("task-c"));
+        cache
+            .get_block(1, || panic!("block 1 must remain cached"))
+            .expect("task-only hit");
+        assert_eq!(
+            cached_block_tags(&store, 1),
+            Some((scope, task_c)),
+            "a task-only hit must preserve the durable scope tag"
+        );
+
+        cache.set_affinity(Some("repo-a"), None);
+        cache
+            .get_block(1, || panic!("block 1 must remain cached"))
+            .expect("scope-only hit");
+        assert_eq!(
+            cached_block_tags(&store, 1),
+            Some((scope, task_c)),
+            "a scope-only hit must preserve the task hint"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cache_rejects_a_foreign_index_hash() {
+        let dir = env::temp_dir().join(format!("cm-cache-replace-{}", model::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let store = dir.join("cm");
+        drop(Cache::create(&store, 7).expect("first cache"));
+        drop(Cache::create(&store, 8).expect("replacement cache"));
+        assert!(Cache::open_existing(&store, 7).is_none());
+        assert!(Cache::open_existing(&store, 8).is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_block_bypasses_the_cache() {
+        let dir = env::temp_dir().join(format!("cm-cache-large-{}", model::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let store = dir.join("cm");
+        let mut cache = Cache::create(&store, 7).expect("create cache");
+        let block = cache
+            .get_block(1, || Ok(vec![9u8; SLOT_SIZE + 1]))
+            .expect("oversized read still succeeds");
+        assert_eq!(block.len(), SLOT_SIZE + 1);
+        assert!(cached_keys(&store).is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -735,6 +817,87 @@ mod store_tests {
             Some((scope, affinity_tag(Some("task-y")))),
             "a later task refreshes the task tag without changing scope"
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn index_pages_are_persisted_in_cache_with_affinity() {
+        let path = empty_indexed_store();
+        for index in 0..100 {
+            let memory = new_memory(
+                "fact",
+                "repo",
+                &format!("subject {index}"),
+                &format!("needle body {index}"),
+                "audit",
+                0.9,
+                Vec::new(),
+                None,
+                None,
+            );
+            append_record(&path, T_MEMORY, &memory_payload(&memory), true).expect("append");
+        }
+        reindex_file(&path).expect("reindex");
+
+        let mut store = Store::open(&path).expect("open");
+        store.set_cache_affinity(Some("repo-index"), Some("task-index"));
+        let hits = store
+            .bm25("needle", None, None, None, None, 10)
+            .expect("bm25");
+        assert!(!hits.is_empty());
+
+        let keys = cached_keys(&path);
+        let index_key = keys
+            .iter()
+            .copied()
+            .find(|key| key & 0x8000_0000 != 0)
+            .expect("index page must enter the disk cache");
+        let (_, scope, task) = cached_entry(&path, index_key).expect("cached index page");
+        assert_eq!(scope, affinity_tag(Some("repo-index")));
+        assert_eq!(task, affinity_tag(Some("task-index")));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn corrupted_cache_slot_falls_back_to_store() {
+        let path = empty_indexed_store();
+        let memory = new_memory(
+            "fact",
+            "test",
+            "cache checksum",
+            "checksum falls back to the original block",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        append_record(&path, T_MEMORY, &memory_payload(&memory), true).expect("append");
+        reindex_file(&path).expect("reindex");
+        {
+            let mut store = Store::open(&path).expect("open");
+            assert_eq!(store.scan_page(usize::MAX, 0).expect("scan").len(), 1);
+        }
+
+        let (_, slot_offset, len) = cached_slot(&path, 0).expect("cached data block");
+        let cache_path = path.with_file_name("cm.cache");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&cache_path)
+            .expect("open cache");
+        file.seek(std::io::SeekFrom::Start(
+            (slot_offset + 5.min(len - 1)) as u64,
+        ))
+        .expect("seek slot");
+        file.write_all(&[0xFF]).expect("corrupt cache slot");
+        file.sync_all().expect("sync corruption");
+
+        let mut store = Store::open(&path).expect("open after corruption");
+        let memories = store
+            .scan_page(usize::MAX, 0)
+            .expect("scan after corruption");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].text, memory.text);
         cleanup(&path);
     }
 }

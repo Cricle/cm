@@ -1,9 +1,11 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use memmap2::{MmapMut, MmapOptions};
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
@@ -11,11 +13,18 @@ use crate::model::now_ms;
 
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
 const CACHE_VERSION: u8 = 1;
-const CACHE_LAYOUT: u8 = 2;
+const CACHE_LAYOUT: u8 = 3;
 const CACHE_HEADER: usize = 64;
 pub(crate) const HOT_BUDGET: usize = 8 * 1024 * 1024;
 pub(crate) const SLOT_SIZE: usize = 64 * 1024;
-const ENTRY_SIZE: usize = 32;
+const ENTRY_SIZE: usize = 48;
+const ENTRY_HITS: usize = 4;
+const ENTRY_LAST: usize = 8;
+const ENTRY_SLOT: usize = 16;
+const ENTRY_LEN: usize = 20;
+const ENTRY_SCOPE: usize = 24;
+const ENTRY_TASK: usize = 28;
+const ENTRY_HASH: usize = 32;
 const MAX_ENTRIES: usize = 1024;
 const SKETCH_ROWS: usize = 4;
 const SKETCH_COLS: usize = 1024;
@@ -50,29 +59,59 @@ impl CacheData {
 pub(crate) struct Cache {
     data: CacheData,
     header: CacheHeader,
+    file: Option<File>,
     active_scope_tag: u32,
     active_task_tag: u32,
 }
 
+struct CacheGuard<'a> {
+    file: &'a File,
+}
+
+impl Drop for CacheGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn lock_file(file: &File) -> Result<CacheGuard<'_>> {
+    let deadline = Instant::now() + Duration::from_millis(25);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(CacheGuard { file }),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(anyhow!("cache lock busy: {error}"));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 impl Cache {
-    /// The cache holds only decompressed data blocks. `index_len` is always
-    /// zero in the header: the index itself lives in the store and is read
-    /// lazily through `store::Index`.
+    /// The cache holds decompressed data blocks and hot index pages.
+    /// `index_len` is always zero in the header: the index itself lives in the
+    /// store and is read lazily through `store::Index`.
     pub(crate) fn open_existing(store_path: &Path, index_hash: u64) -> Option<Self> {
         let path = cache_path(store_path);
-        let (size, _, table_cap, _, slot_count, sketch_off) = layout().ok()?;
-        let mmap = open_mmap(&path).ok()?;
+        let (size, table_off, table_cap, data_off, slot_count, sketch_off) = layout().ok()?;
+        let (file, mmap) = open_cache(&path).ok()?;
         let header = decode_header(&mmap)?;
         if header.index_hash == index_hash
             && header.index_len == 0
+            && header.table_off == table_off as u64
             && header.table_cap == table_cap as u32
+            && header.slot_size == SLOT_SIZE as u32
             && header.slot_count == slot_count as u32
+            && header.data_off == data_off as u64
             && header.sketch_off == sketch_off as u32
             && mmap.len() == size
         {
             Some(Self {
                 data: CacheData::Mmap(mmap),
                 header,
+                file: Some(file),
                 active_scope_tag: 0,
                 active_task_tag: 0,
             })
@@ -123,6 +162,24 @@ impl Cache {
             let _ = fs::remove_file(&tmp);
             return Err(error).with_context(|| format!("install cache {}", path.display()));
         }
+        let (file, mmap) = open_cache(&path)?;
+        if mmap.len() != size {
+            bail!("cache size changed while opening {}", path.display());
+        }
+        // Another process may have replaced the cache between rename and open.
+        // Never trust a cache unless it belongs to this index and layout.
+        let actual = decode_header(&mmap).ok_or_else(|| anyhow!("cache header invalid"))?;
+        if actual.index_hash != index_hash
+            || actual.index_len != 0
+            || actual.table_off != table_off as u64
+            || actual.table_cap != table_cap as u32
+            || actual.slot_size != SLOT_SIZE as u32
+            || actual.slot_count != slot_count as u32
+            || actual.data_off != data_off as u64
+            || actual.sketch_off != sketch_off as u32
+        {
+            bail!("cache was replaced while opening {}", path.display());
+        }
         let header = CacheHeader {
             index_hash,
             index_len: 0,
@@ -133,13 +190,10 @@ impl Cache {
             data_off: data_off as u64,
             sketch_off: sketch_off as u32,
         };
-        let mmap = open_mmap(&path)?;
-        if mmap.len() != size {
-            bail!("cache size changed while opening {}", path.display());
-        }
         Ok(Self {
             data: CacheData::Mmap(mmap),
             header,
+            file: Some(file),
             active_scope_tag: 0,
             active_task_tag: 0,
         })
@@ -165,24 +219,47 @@ impl Cache {
         Ok(Self {
             data: CacheData::Memory(data),
             header,
+            file: None,
             active_scope_tag: 0,
             active_task_tag: 0,
         })
     }
 
-    /// Scope/task affinity for blocks touched by the current query. Scope is
+    /// Scope/task affinity for keys touched by the current query. Scope is
     /// the durable working set (one coding workspace); task is the ephemeral
-    /// working set inside that workspace. Scope survives task switches when
-    /// the cache has room; a new task takes eviction priority under pressure.
+    /// working set inside that workspace. Scope protects the project from
+    /// foreign blocks; task is a tie-break and a prefetch tag so alternating
+    /// tasks can share the cache instead of wiping each other.
     pub(crate) fn set_affinity(&mut self, scope: Option<&str>, task: Option<&str>) {
         self.active_scope_tag = affinity_tag(scope);
         self.active_task_tag = affinity_tag(task);
     }
 
-    pub(crate) fn get_block<F>(&mut self, block_id: u32, decompress: F) -> Result<Vec<u8>>
+    pub(crate) fn get_block<F>(&mut self, key: u32, decompress: F) -> Result<Vec<u8>>
     where
         F: FnOnce() -> Result<Vec<u8>>,
     {
+        if let Some(block) = self.try_get(key)? {
+            return Ok(block);
+        }
+
+        let block = decompress()?;
+        if block.len() > SLOT_SIZE {
+            // Valid records can exceed one cache slot. Reads must still work;
+            // they simply bypass the cache instead of failing.
+            return Ok(block);
+        }
+
+        let guard = if let Some(file) = &self.file {
+            match lock_file(file) {
+                Ok(guard) => Some(guard),
+                // A cache that cannot be locked is still optional: return the
+                // freshly decompressed block without mutating the file.
+                Err(_) => return Ok(block),
+            }
+        } else {
+            None
+        };
         let table_start = self.header.table_off as usize;
         let cap = self.header.table_cap as usize;
         let data_off = self.header.data_off as usize;
@@ -190,101 +267,155 @@ impl Cache {
         let active_scope_tag = self.active_scope_tag;
         let active_task_tag = self.active_task_tag;
         let affinity_enabled = active_scope_tag != 0 || active_task_tag != 0;
-        let candidate_rank = if active_task_tag != 0 {
-            3
-        } else if active_scope_tag != 0 {
-            2
-        } else {
-            1
-        };
         let data = self.data.as_mut_slice();
-        for i in 0..cap {
-            let offset = table_start + i * ENTRY_SIZE;
-            if read_u32(data, offset) == block_id {
-                let len = read_u32(data, offset + 20) as usize;
-                if len > 0 {
-                    let slot = read_u32(data, offset + 16) as usize;
-                    let start = data_off + slot * SLOT_SIZE;
-                    let block = data[start..start + len].to_vec();
-                    let hits = read_u32(data, offset + 4).saturating_add(1);
-                    write_u32(data, offset + 4, hits);
-                    write_u64(data, offset + 8, now_ms());
-                    if affinity_enabled {
-                        write_u32(data, offset + 24, active_scope_tag);
-                        write_u32(data, offset + 28, active_task_tag);
-                    }
-                    sketch_bump(data, sketch_off, block_id);
-                    return Ok(block);
-                }
-            }
+        if let Some(existing) =
+            lookup_locked(data, &self.header, active_scope_tag, active_task_tag, key)
+        {
+            return Ok(existing);
         }
 
-        let block = decompress()?;
-        if block.len() > SLOT_SIZE {
-            bail!("cache block too large: {}", block.len());
-        }
-        sketch_bump(data, sketch_off, block_id);
+        sketch_bump(data, sketch_off, key);
         let mut victim = 0usize;
         let mut victim_rank = u8::MAX;
         let mut victim_hits = u32::MAX;
+        let mut victim_task_penalty = 0u8;
         let mut victim_time = u64::MAX;
         for i in 0..cap {
             let offset = table_start + i * ENTRY_SIZE;
-            let len = read_u32(data, offset + 20);
+            let len = read_u32(data, offset + ENTRY_LEN);
             if len == 0 {
                 victim = i;
                 break;
             }
+            let entry_task = read_u32(data, offset + ENTRY_TASK);
             let rank = rank_for(
                 active_scope_tag,
                 active_task_tag,
-                read_u32(data, offset + 24),
-                read_u32(data, offset + 28),
+                read_u32(data, offset + ENTRY_SCOPE),
+                entry_task,
             );
-            let hits = read_u32(data, offset + 4);
-            let last = read_u64(data, offset + 8);
+            // Task is a tie-break, not a trump card: unrelated tasks must be
+            // able to reuse the cache instead of wiping each other's pages.
+            let task_penalty = u8::from(active_task_tag != 0 && entry_task != active_task_tag);
+            let hits = read_u32(data, offset + ENTRY_HITS);
+            let last = read_u64(data, offset + ENTRY_LAST);
             if rank < victim_rank
                 || (rank == victim_rank
-                    && (hits < victim_hits || (hits == victim_hits && last < victim_time)))
+                    && (hits < victim_hits
+                        || (hits == victim_hits
+                            && (task_penalty > victim_task_penalty
+                                || (task_penalty == victim_task_penalty && last < victim_time)))))
             {
                 victim = i;
                 victim_rank = rank;
                 victim_hits = hits;
+                victim_task_penalty = task_penalty;
                 victim_time = last;
             }
         }
         let victim_offset = table_start + victim * ENTRY_SIZE;
-        let victim_len = read_u32(data, victim_offset + 20);
+        let victim_len = read_u32(data, victim_offset + ENTRY_LEN);
         if victim_len > 0 {
             let victim_id = read_u32(data, victim_offset);
-            let candidate_freq = sketch_estimate(data, sketch_off, block_id);
+            let candidate_freq = sketch_estimate(data, sketch_off, key);
             let victim_freq = sketch_estimate(data, sketch_off, victim_id);
-            let protects_working_set = affinity_enabled && victim_rank > candidate_rank;
-            if protects_working_set
-                || (victim_rank == candidate_rank && victim_freq >= candidate_freq)
-            {
-                // TinyLFU admission plus scope/task affinity: one-off scans
-                // and other projects must not evict the current working set.
+            let same_priority = !affinity_enabled || active_scope_tag == 0 || victim_rank == 2;
+            if same_priority && victim_freq >= candidate_freq {
+                // TinyLFU admission within the active workspace: a one-off
+                // scan must not evict a repeatedly reused block or index page.
                 return Ok(block);
             }
         }
         let slot = victim as u32;
         let start = data_off + slot as usize * SLOT_SIZE;
         data[start..start + block.len()].copy_from_slice(&block);
-        write_u32(data, victim_offset, block_id);
-        write_u32(data, victim_offset + 4, 1);
-        write_u64(data, victim_offset + 8, now_ms());
-        write_u32(data, victim_offset + 16, slot);
-        write_u32(data, victim_offset + 20, block.len() as u32);
+        write_u32(data, victim_offset, key);
+        write_u32(data, victim_offset + ENTRY_HITS, 1);
+        write_u64(data, victim_offset + ENTRY_LAST, now_ms());
+        write_u32(data, victim_offset + ENTRY_SLOT, slot);
+        write_u32(data, victim_offset + ENTRY_LEN, block.len() as u32);
         if affinity_enabled {
-            write_u32(data, victim_offset + 24, active_scope_tag);
-            write_u32(data, victim_offset + 28, active_task_tag);
+            write_u32(data, victim_offset + ENTRY_SCOPE, active_scope_tag);
+            write_u32(data, victim_offset + ENTRY_TASK, active_task_tag);
         } else {
-            write_u32(data, victim_offset + 24, 0);
-            write_u32(data, victim_offset + 28, 0);
+            write_u32(data, victim_offset + ENTRY_SCOPE, 0);
+            write_u32(data, victim_offset + ENTRY_TASK, 0);
         }
+        write_u64(
+            data,
+            victim_offset + ENTRY_HASH,
+            xxh3_64_with_seed(&block, key as u64),
+        );
+        drop(guard);
         Ok(block)
     }
+
+    fn try_get(&mut self, key: u32) -> Result<Option<Vec<u8>>> {
+        let guard = if let Some(file) = &self.file {
+            match lock_file(file) {
+                Ok(guard) => Some(guard),
+                Err(_) => return Ok(None),
+            }
+        } else {
+            None
+        };
+        let active_scope_tag = self.active_scope_tag;
+        let active_task_tag = self.active_task_tag;
+        let data = self.data.as_mut_slice();
+        let block = lookup_locked(data, &self.header, active_scope_tag, active_task_tag, key);
+        drop(guard);
+        Ok(block)
+    }
+}
+
+fn lookup_locked(
+    data: &mut [u8],
+    header: &CacheHeader,
+    active_scope_tag: u32,
+    active_task_tag: u32,
+    key: u32,
+) -> Option<Vec<u8>> {
+    let table_start = header.table_off as usize;
+    let cap = header.table_cap as usize;
+    let data_off = header.data_off as usize;
+    let sketch_off = header.sketch_off as usize;
+    for i in 0..cap {
+        let offset = table_start + i * ENTRY_SIZE;
+        if read_u32(data, offset) != key {
+            continue;
+        }
+        let len = read_u32(data, offset + ENTRY_LEN) as usize;
+        if len == 0 || len > SLOT_SIZE {
+            continue;
+        }
+        let slot = read_u32(data, offset + ENTRY_SLOT) as usize;
+        let start = data_off + slot * SLOT_SIZE;
+        if start.checked_add(len).is_none_or(|end| end > data.len()) {
+            write_u32(data, offset + ENTRY_LEN, 0);
+            continue;
+        }
+        let block = data[start..start + len].to_vec();
+        if xxh3_64_with_seed(&block, key as u64) != read_u64(data, offset + ENTRY_HASH) {
+            // Torn or stale cache slot: drop the entry and fall through to a
+            // fresh decompression instead of returning bad bytes.
+            write_u32(data, offset + ENTRY_LEN, 0);
+            continue;
+        }
+        let hits = read_u32(data, offset + ENTRY_HITS).saturating_add(1);
+        write_u32(data, offset + ENTRY_HITS, hits);
+        write_u64(data, offset + ENTRY_LAST, now_ms());
+        // A task-only query must not erase the durable scope tag; a scope-only
+        // query likewise leaves the task hint intact.
+        if active_scope_tag != 0 {
+            write_u32(data, offset + ENTRY_SCOPE, active_scope_tag);
+        }
+        if active_task_tag != 0 {
+            write_u32(data, offset + ENTRY_TASK, active_task_tag);
+        }
+        sketch_bump(data, sketch_off, key);
+        return Some(block);
+    }
+    None
 }
 
 pub(crate) fn cache_path(store_path: &Path) -> PathBuf {
@@ -305,8 +436,8 @@ fn temp_cache_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn layout() -> Result<(usize, usize, usize, usize, usize, usize)> {
-    // The block cache is deliberately fixed at the hot budget; the index is
-    // no longer copied here.
+    // The cache is deliberately fixed at the hot budget. It stores both
+    // decompressed data blocks and hot 64 KiB index pages.
     let size = HOT_BUDGET;
     let table_off = align8(CACHE_HEADER);
     let available = size.saturating_sub(table_off);
@@ -329,9 +460,10 @@ pub(crate) fn layout() -> Result<(usize, usize, usize, usize, usize, usize)> {
     }
 }
 
-fn open_mmap(path: &Path) -> Result<MmapMut> {
+fn open_cache(path: &Path) -> Result<(File, MmapMut)> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    unsafe { MmapOptions::new().map_mut(&file).context("mmap cache") }
+    let mmap = unsafe { MmapOptions::new().map_mut(&file).context("mmap cache")? };
+    Ok((file, mmap))
 }
 
 fn encode_header(header: &CacheHeader) -> [u8; CACHE_HEADER] {
@@ -422,12 +554,9 @@ fn rank_for(active_scope: u32, active_task: u32, scope_tag: u32, task_tag: u32) 
     if active_scope == 0 && active_task == 0 {
         return 1;
     }
-    if active_task != 0
-        && task_tag == active_task
-        && (active_scope == 0 || scope_tag == active_scope)
+    if (active_scope != 0 && scope_tag == active_scope)
+        || (active_scope == 0 && active_task != 0 && task_tag == active_task)
     {
-        3
-    } else if active_scope != 0 && scope_tag == active_scope {
         2
     } else if scope_tag == 0 && task_tag == 0 {
         0

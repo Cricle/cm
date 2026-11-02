@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
@@ -27,6 +27,8 @@ const PAGE_ENTRY: usize = 24;
 const PAGE_TABLE_HEADER: usize = 24;
 const INDEX_PAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const INDEX_PAGE_CACHE_PAGES: usize = INDEX_PAGE_CACHE_BYTES / PAGE_SIZE;
+/// Cache keys use the high bit for index pages; data block ids stay below it.
+const INDEX_PAGE_KEY: u32 = 1 << 31;
 pub(crate) const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
 const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
@@ -84,7 +86,7 @@ impl Record {
 pub(crate) struct Store {
     pub mmap: Arc<Mmap>,
     pub header: Header,
-    pub cache: Cache,
+    pub cache: Arc<Mutex<Cache>>,
     index: Index,
 }
 
@@ -183,6 +185,7 @@ struct PagedIndex {
     entries: Arc<Vec<PageEntry>>,
     cache: RefCell<PageCache>,
     decompressor: RefCell<zstd::bulk::Decompressor<'static>>,
+    disk_cache: Option<Arc<Mutex<Cache>>>,
     len: usize,
     hash: u64,
 }
@@ -218,6 +221,27 @@ impl PagedIndex {
             .entries
             .get(page_id)
             .ok_or_else(|| anyhow!("index page {page_id} out of range"))?;
+        if let Some(disk_cache) = &self.disk_cache {
+            let key = INDEX_PAGE_KEY | page_id as u32;
+            let raw = {
+                let mut cache = disk_cache
+                    .lock()
+                    .map_err(|_| anyhow!("index cache lock poisoned"))?;
+                cache.get_block(key, || {
+                    decompress_index_page(
+                        &self.mmap,
+                        page_id,
+                        entry,
+                        &mut self.decompressor.borrow_mut(),
+                    )
+                })?
+            };
+            if raw.len() == entry.raw_len as usize && xxh3_64(&raw) == entry.hash {
+                let page: Arc<[u8]> = Arc::from(raw.into_boxed_slice());
+                self.cache.borrow_mut().insert(page_id, Arc::clone(&page));
+                return Ok(page);
+            }
+        }
         let raw = decompress_index_page(
             &self.mmap,
             page_id,
@@ -380,7 +404,11 @@ impl Index {
         }
     }
 
-    fn from_pages(mmap: Arc<Mmap>, header: &Header) -> Result<Self> {
+    fn from_pages(
+        mmap: Arc<Mmap>,
+        header: &Header,
+        disk_cache: Option<Arc<Mutex<Cache>>>,
+    ) -> Result<Self> {
         let start = header.index_off as usize;
         let end = start
             .checked_add(header.index_len as usize)
@@ -399,6 +427,7 @@ impl Index {
                 entries: Arc::new(entries),
                 cache: RefCell::new(PageCache::new()),
                 decompressor: RefCell::new(zstd::bulk::Decompressor::new()?),
+                disk_cache,
                 len,
                 hash: header.index_hash,
             }),
@@ -764,13 +793,11 @@ impl Store {
         if header.index_len == 0 {
             bail!("no index; run cm reindex");
         }
+        if header.block_count >= u64::from(INDEX_PAGE_KEY) {
+            bail!("too many blocks for the cache key space");
+        }
         // Page-index stores load only the page table here. The legacy
         // single-blob path decompresses the index once, as before.
-        let index = if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
-            Index::from_pages(Arc::clone(&mmap), &header)?
-        } else {
-            Index::from_blob(read_index_raw(&mmap[..], &header)?)
-        };
         let cache = match Cache::open_existing(path, header.index_hash) {
             Some(cache) => cache,
             None => match Cache::create(path, header.index_hash) {
@@ -784,6 +811,12 @@ impl Store {
                     None => Cache::memory(header.index_hash)?,
                 },
             },
+        };
+        let cache = Arc::new(Mutex::new(cache));
+        let index = if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
+            Index::from_pages(Arc::clone(&mmap), &header, Some(Arc::clone(&cache)))?
+        } else {
+            Index::from_blob(read_index_raw(&mmap[..], &header)?)
         };
         Ok(Self {
             mmap,
@@ -799,7 +832,9 @@ impl Store {
 
     /// Set the working-set affinity for blocks touched by this query.
     pub(crate) fn set_cache_affinity(&mut self, scope: Option<&str>, task: Option<&str>) {
-        self.cache.set_affinity(scope, task);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.set_affinity(scope, task);
+        }
     }
 
     /// Warm the blocks belonging to selected memory ids. This makes the
@@ -813,11 +848,14 @@ impl Store {
         }
         blocks.sort_unstable();
         blocks.dedup();
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow!("cache lock poisoned"))?;
         for block_id in blocks {
             let data = std::sync::Arc::clone(&self.mmap);
             let header = self.header;
-            self.cache
-                .get_block(block_id, || decompress_block(&data, &header, block_id))?;
+            cache.get_block(block_id, || decompress_block(&data, &header, block_id))?;
         }
         Ok(())
     }
@@ -833,10 +871,14 @@ impl Store {
     pub(crate) fn doc_memory(&mut self, meta: &DocMeta) -> Result<Memory> {
         let data: &[u8] = &self.mmap[..];
         let header = self.header;
-        let cache = &mut self.cache;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow!("cache lock poisoned"))?;
         let block = cache.get_block(meta.block_id, || {
             decompress_block(data, &header, meta.block_id)
         })?;
+        drop(cache);
         let start = meta.offset_in_block as usize;
         let end = start + meta.record_len as usize;
         if end > block.len() {
@@ -2093,6 +2135,9 @@ fn build_index(active: Vec<ActiveDoc<'_>>, reencode: bool) -> Result<(Vec<u8>, V
             let block = seal_block(&current)?;
             blocks.push(block);
             current.clear();
+        }
+        if blocks.len() >= INDEX_PAGE_KEY as usize {
+            bail!("too many blocks for the cache key space");
         }
         let block_id = blocks.len() as u32;
         let offset = current.len() as u32;

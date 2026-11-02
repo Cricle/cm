@@ -186,11 +186,12 @@ regression checks, not as a general accuracy claim.
 - `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.
 - Memory payloads use a schema-aware presence map with varint lengths; defaults are omitted. `cm reindex` re-encodes old records into the compact schema.
 - The index uses 8-byte ID-hash slots and delta-varint postings; older index versions remain readable.
-- `cm.cache` holds only decompressed blocks (8 MiB); index pages are loaded from the `cm` page table on demand through an in-process page cache.
+- `cm.cache` holds decompressed data blocks and hot 64 KiB index pages (8 MiB); cold index pages are loaded from the `cm` page table on demand through an in-process page cache.
 - Header version byte remains `1`.
 - No SQLite or external database.
-- Hot ops use mmap and a bounded block cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
-- Cache entries carry scope and task affinity tags. Eviction protects the current task first, then the current workspace; query result blocks are prefetched and tagged. This is a single-workspace working-set accelerator, not a global knowledge cache.
+- Hot ops use mmap and a bounded, disk-backed block/index-page cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
+- Cache entries carry scope and task affinity tags. Scope is the primary eviction priority; task is a tie-break and prefetch tag, so alternating tasks share the cache instead of wiping each other. Query result blocks and index pages are prefetched/tagged. This is a single-workspace working-set accelerator, not a global knowledge cache.
+- Cache writes are serialized with an OS file lock and entries carry XXH3 checksums, so parallel agent processes cannot return torn blocks; a damaged cache slot falls back to decompression.
 
 ### Compact schema and size
 
@@ -215,15 +216,31 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 | `append` | ~8 ms |
 | `search --top 8` | ~16 ms |
 
-With lazy index pages, cold 1M `status` is ~22 ms, `scan --limit 100` ~11 ms,
-and `search` ~15 ms; `cm.cache` is 8 MiB instead of ~114 MiB. Warm queries stay
-under 30 ms.
+With lazy and disk-backed index pages, a reindexed 1M store measured 32–48 ms
+for `search --top 8` including process startup; a 20-term query that walks 126
+index pages measured ~35–48 ms warm. The first process after a fresh build or
+cache replacement can be slower while the OS reloads the store.
+`cm.cache` remains 8 MiB instead of ~114 MiB. Numbers are workload-dependent.
 
 `checkpoint` (cold process, 1M records) measured ~1.2s; 10k ~20ms.
 `checkpoint --in-place` measured ~0.13s / 1M and ~9ms / 10k, adding only one
 dirty index page plus the page table per changeset. A full `reindex` of the
 same 1M store is roughly 10-20s. Numbers are workload-dependent; use `cm verify`
 after bulk changes.
+
+Working-set checks:
+
+- 90k records, alternating parser/database queries: both plain and `--task`
+  measured ~16 ms average because both working sets fit in 8 MiB. The task tag
+  is therefore a tie-break/prefetch hint, not a frequency override; it does not
+  hurt the plain path.
+- 1M page-index store, 20-term query: 32–48 ms warm including process startup;
+  the query touched 126 index pages and one data block, using all 127 cache
+  slots. Alternating two long task queries measured 21.3 ms average with
+  `--task` vs 22.2 ms plain, with more cache hits (2237 vs 2208).
+- 8 concurrent processes × 30 mixed queries: 240/240 succeeded; 64 concurrent
+  long queries on the 1M store also succeeded. Cache entries carry XXH3
+  checksums so a torn slot falls back to the store.
 
 ## Development
 
