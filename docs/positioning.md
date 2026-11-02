@@ -28,6 +28,11 @@ tags identify the current work item and break eviction ties, and query results
 are prefetched. Nothing in the cache is authoritative; deleting it only costs a
 cold start.
 
+The task frame is the small working-memory layer: goal, status, constraints,
+next steps, open questions, and touched paths for the current work item. It is
+stored as a normal memory record (`kind=frame`), superseded on update, and kept
+separate from project facts.
+
 ## Memory shape
 
 A useful `cm` has three layers:

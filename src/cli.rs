@@ -21,6 +21,26 @@ use crate::store::{
 };
 
 const SKILL_TEXT: &str = include_str!("../assets/SKILL.md");
+const FRAME_SCOPE: &str = "__cm_frame__";
+const FRAME_KIND: &str = "frame";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TaskFrame {
+    task: String,
+    goal: String,
+    status: String,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    next: Vec<String>,
+    #[serde(default)]
+    open: Vec<String>,
+    #[serde(default)]
+    touches: Vec<String>,
+    #[serde(default)]
+    notes: Vec<String>,
+    updated_at: u64,
+}
 
 macro_rules! outln {
     ($($arg:tt)*) => {{
@@ -254,15 +274,23 @@ pub fn run() -> Result<()> {
             )
         }
         "recall" => {
-            let query =
-                arg_value(&args, "--query").ok_or_else(|| anyhow!("recall requires --query"))?;
+            let task = arg_value(&args, "--task");
+            let query = match arg_value(&args, "--query") {
+                Some(query) => query,
+                None => {
+                    let task = task
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("recall requires --query or --task with a frame"))?;
+                    frame_query_for_task(&arg_path(&args), task)?
+                }
+            };
             cmd_context(
                 &arg_path(&args),
                 &query,
                 arg_usize(&args, "--budget", 800),
                 arg_usize(&args, "--top", 16),
                 arg_value(&args, "--scope"),
-                arg_value(&args, "--task"),
+                task,
                 arg_value(&args, "--kind"),
                 Some(arg_value(&args, "--min-trust").unwrap_or_else(|| "authored".to_string())),
                 arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
@@ -273,6 +301,7 @@ pub fn run() -> Result<()> {
         }
         "status" => cmd_verify(&arg_path(&args), false),
         "cache-stats" => cmd_cache_stats(&arg_path(&args)),
+        "frame" => cmd_frame(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -387,6 +416,9 @@ fn print_usage() {
          cm forget --file cm --id <id>
          cm status [--file cm]
          cm cache-stats [--file cm]
+         cm frame set --task <id> --goal <text> [--next <text>] [--open <text>]
+         cm frame get --task <id>
+         cm frame list
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -710,6 +742,201 @@ fn cmd_cache_stats(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cmd_frame(path: &Path, args: &[String]) -> Result<()> {
+    match args.get(1).map(String::as_str) {
+        Some("set") => cmd_frame_set(path, args),
+        Some("get") => cmd_frame_get(path, args),
+        Some("list") => cmd_frame_list(path),
+        other => bail!("frame expects set, get, or list; got {other:?}"),
+    }
+}
+
+fn frame_task(args: &[String]) -> Result<String> {
+    arg_value(args, "--task").ok_or_else(|| anyhow!("frame requires --task"))
+}
+
+fn frame_subject(task: &str) -> String {
+    format!("frame:{task}")
+}
+
+fn append_values(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !value.trim().is_empty() && !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+fn parse_frame(memory: &crate::model::Memory) -> Option<TaskFrame> {
+    serde_json::from_str(&memory.text).ok()
+}
+
+fn collect_frames(store: &mut Store, limit: usize) -> Result<Vec<crate::model::Memory>> {
+    let scope_id = store.scope_id(FRAME_SCOPE)?;
+    let kind = kind_id(FRAME_KIND);
+    let tail = store.tail_view()?;
+    let mut hits: HashMap<String, crate::model::Memory> = HashMap::new();
+    if scope_id.is_some() {
+        for (doc_idx, _) in store.bm25("frame", scope_id, kind, None, None, limit.min(512))? {
+            let meta = store.doc_meta(doc_idx)?;
+            let memory = store.doc_memory(&meta)?;
+            if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("frame:") {
+                hits.insert(memory.id.clone(), memory);
+            }
+        }
+    }
+    for (_, memory) in tail.bm25(
+        "frame",
+        Some(FRAME_SCOPE),
+        Some(FRAME_KIND),
+        None,
+        limit.min(512),
+    ) {
+        if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("frame:") {
+            hits.insert(memory.id.clone(), memory);
+        }
+    }
+    let mut by_task: HashMap<String, crate::model::Memory> = HashMap::new();
+    for memory in hits.into_values() {
+        match by_task.get(&memory.subject) {
+            Some(existing) if existing.created_at >= memory.created_at => {}
+            _ => {
+                by_task.insert(memory.subject.clone(), memory);
+            }
+        }
+    }
+    let mut frames: Vec<_> = by_task.into_values().collect();
+    frames.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.subject.cmp(&b.subject))
+    });
+    frames.truncate(limit);
+    Ok(frames)
+}
+
+fn frame_query_for_task(path: &Path, task: &str) -> Result<String> {
+    let mut store = Store::open(path)?;
+    let memory = collect_frames(&mut store, 64)?
+        .into_iter()
+        .find(|memory| memory.subject == frame_subject(task))
+        .ok_or_else(|| anyhow!("no frame for task {task:?}; pass --query"))?;
+    let frame = parse_frame(&memory).ok_or_else(|| anyhow!("invalid frame payload"))?;
+    let mut parts = vec![frame.goal];
+    parts.extend(frame.next);
+    parts.extend(frame.open);
+    parts.retain(|part| !part.trim().is_empty());
+    if parts.is_empty() {
+        bail!("frame for task {task:?} has no goal or next steps; pass --query");
+    }
+    Ok(parts.join(" "))
+}
+
+fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::Value {
+    json!({
+        "id": memory.id,
+        "task": frame.task,
+        "goal": frame.goal,
+        "status": frame.status,
+        "constraints": frame.constraints,
+        "next": frame.next,
+        "open": frame.open,
+        "touches": frame.touches,
+        "notes": frame.notes,
+        "updated_at": frame.updated_at
+    })
+}
+
+fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
+    let task = frame_task(args)?;
+    let mut store = Store::open(path)?;
+    let existing = collect_frames(&mut store, 64)?
+        .into_iter()
+        .find(|memory| memory.subject == frame_subject(&task));
+    let existing_id = existing.as_ref().map(|memory| memory.id.clone());
+    let mut frame = existing
+        .as_ref()
+        .and_then(parse_frame)
+        .unwrap_or_else(|| TaskFrame {
+            task: task.clone(),
+            goal: String::new(),
+            status: "active".to_string(),
+            constraints: Vec::new(),
+            next: Vec::new(),
+            open: Vec::new(),
+            touches: Vec::new(),
+            notes: Vec::new(),
+            updated_at: 0,
+        });
+    frame.task = task.clone();
+    if let Some(goal) = arg_value(args, "--goal") {
+        frame.goal = goal;
+    }
+    if frame.goal.trim().is_empty() {
+        bail!("frame requires --goal for a new task");
+    }
+    if let Some(status) = arg_value(args, "--status") {
+        if !matches!(status.as_str(), "active" | "paused" | "done") {
+            bail!("invalid frame status {status:?}; expected active/paused/done");
+        }
+        frame.status = status;
+    }
+    append_values(&mut frame.constraints, arg_values(args, "--constraint"));
+    append_values(&mut frame.next, arg_values(args, "--next"));
+    append_values(&mut frame.open, arg_values(args, "--open"));
+    append_values(&mut frame.touches, arg_values(args, "--touch"));
+    append_values(&mut frame.notes, arg_values(args, "--note"));
+    frame.updated_at = crate::model::now_ms();
+
+    let input = AppendInput {
+        kind: FRAME_KIND.to_string(),
+        scope: FRAME_SCOPE.to_string(),
+        subject: frame_subject(&task),
+        text: serde_json::to_string(&frame)?,
+        source: arg_value(args, "--source").unwrap_or_else(|| "agent".to_string()),
+        confidence: 1.0,
+        valid_from: frame.updated_at,
+        valid_to: None,
+        supersedes: existing_id.into_iter().collect(),
+        conflict_of: None,
+        trust: Some("authored".to_string()),
+        source_commit: arg_value(args, "--source-commit"),
+    };
+    let memory = memory_from_input(&input)?;
+    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    outln!(
+        "{}",
+        json!({"ok": true, "id": memory.id, "task": task, "status": frame.status})
+    );
+    Ok(())
+}
+
+fn cmd_frame_get(path: &Path, args: &[String]) -> Result<()> {
+    let task = frame_task(args)?;
+    let mut store = Store::open(path)?;
+    let memory = collect_frames(&mut store, 64)?
+        .into_iter()
+        .find(|memory| memory.subject == frame_subject(&task));
+    if let Some(memory) = memory {
+        let frame = parse_frame(&memory)
+            .ok_or_else(|| anyhow!("frame record {} has invalid payload", memory.id))?;
+        outln!("{}", serde_json::to_string(&frame_json(&memory, &frame))?);
+    } else {
+        outln!("{}", json!({"task": task, "found": false}));
+    }
+    Ok(())
+}
+
+fn cmd_frame_list(path: &Path) -> Result<()> {
+    let mut store = Store::open(path)?;
+    let frames: Vec<_> = collect_frames(&mut store, 512)?
+        .iter()
+        .filter_map(|memory| parse_frame(memory).map(|frame| frame_json(memory, &frame)))
+        .collect();
+    outln!("{}", serde_json::to_string(&frames)?);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_search(
     path: &Path,
@@ -768,6 +995,7 @@ pub(crate) fn search_out(
         },
         None => None,
     };
+    let allow_frame = kind.as_deref() == Some(FRAME_KIND);
     let min_rank = match min_trust.as_deref() {
         Some(value) => trust_rank(value),
         None => -1,
@@ -805,7 +1033,8 @@ pub(crate) fn search_out(
     let mut candidates: Vec<SearchHit> = hits
         .into_values()
         .filter(|(bm25, memory)| {
-            *bm25 >= min_score
+            (allow_frame || memory.kind != FRAME_KIND)
+                && *bm25 >= min_score
                 && (include_expired || memory.valid_to.is_none_or(|end| end > now))
                 && trust_rank(&memory.trust) >= min_rank
         })
@@ -882,6 +1111,7 @@ fn cmd_context(
         },
         None => None,
     };
+    let allow_frame = kind.as_deref() == Some(FRAME_KIND);
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if scope.is_none() || scope_id.is_some() {
         for (doc_idx, score) in store.bm25(
@@ -914,7 +1144,10 @@ fn cmd_context(
         .filter(|(score, memory)| {
             let not_expired = memory.valid_to.is_none_or(|end| end > now);
             let trust_ok = trust_rank(&memory.trust) >= min_rank;
-            *score >= min_score && not_expired && trust_ok
+            (allow_frame || memory.kind != FRAME_KIND)
+                && *score >= min_score
+                && not_expired
+                && trust_ok
         })
         .collect();
     candidates.sort_by(|a, b| {
@@ -1545,6 +1778,15 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
         .position(|arg| arg == flag)
         .and_then(|index| args.get(index + 1))
         .cloned()
+}
+
+fn arg_values(args: &[String], flag: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == flag)
+        .filter_map(|(index, _)| args.get(index + 1))
+        .cloned()
+        .collect()
 }
 fn arg_path(args: &[String]) -> PathBuf {
     PathBuf::from(arg_value(args, "--file").unwrap_or_else(|| "cm".to_string()))

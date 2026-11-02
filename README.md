@@ -54,7 +54,8 @@ remains the project-local installation path.
 
 ```text
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
-cm recall --file cm --query "<task>" [--scope <scope>] [--task <task>] [--budget 800] [--full]
+cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
+cm recall --file cm --task <task>    # query comes from the task frame
 cm forget --file cm --id <id>
 cm status [--file cm]
 cm cache-stats [--file cm]
@@ -70,6 +71,7 @@ usually fit in 800 tokens. Use `--full` for complete text on every hit.
 stable id for the current work item (branch, issue, or agent task) so `cm.cache`
 keeps the blocks read by this task; `--scope` remains the durable workspace
 affinity. Result blocks are prefetched into that working set after a query.
+When `--query` is omitted, `recall` uses the task frame's goal and next steps.
 
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
@@ -79,8 +81,10 @@ tail-only check to avoid decoding every record on each write.
 
 `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
 problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,
-and evictions. Read commands may create or update the disposable `cm.cache`
-cache; `cm` remains unchanged.
+and evictions. `frame` stores the current task's goal, status, constraints,
+next steps, open questions, and touched paths as a normal memory record; updates
+supersede the previous frame. Read commands may create or update the disposable
+`cm.cache` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -94,6 +98,9 @@ cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
 cm cache-stats [--file cm]
+cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--next <text>]... [--open <text>]... [--touch <path>]...
+cm frame get --file cm --task <id>
+cm frame list [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]

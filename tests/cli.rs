@@ -166,6 +166,99 @@ fn task_flag_is_accepted_and_tags_the_cache_working_set() {
 }
 
 #[test]
+fn task_frame_roundtrip_and_reindex() {
+    let dir = temp_dir("frame");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Make cache fast",
+            "--constraint",
+            "keep 8MiB",
+            "--next",
+            "benchmark 1M",
+            "--touch",
+            "src/cache.rs",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "cache",
+            "--text",
+            "Make cache fast with an 8MiB working set",
+            "--scope",
+            "repo",
+            "--source",
+            "README",
+        ],
+    ));
+    let frame_recall = run(&dir, &["recall", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&frame_recall);
+    assert!(
+        String::from_utf8_lossy(&frame_recall.stdout).contains("cache"),
+        "recall without --query should use the frame"
+    );
+    assert!(
+        !String::from_utf8_lossy(&frame_recall.stdout).contains("\tframe\t"),
+        "ordinary recall must not return the frame record itself"
+    );
+    let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&get);
+    let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("frame json");
+    assert_eq!(frame["goal"], "Make cache fast");
+    assert_eq!(frame["status"], "active");
+    assert_eq!(frame["constraints"][0], "keep 8MiB");
+
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--status",
+            "paused",
+            "--next",
+            "check index pages",
+        ],
+    ));
+    let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&get);
+    let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("updated frame");
+    assert_eq!(frame["status"], "paused");
+    assert_eq!(frame["goal"], "Make cache fast");
+    assert_eq!(frame["next"].as_array().unwrap().len(), 2);
+
+    assert_ok(&run(&dir, &["reindex", "--file", file_arg]));
+    let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&get);
+    let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("indexed frame");
+    assert_eq!(frame["status"], "paused");
+    let list = run(&dir, &["frame", "list", "--file", file_arg]);
+    assert_ok(&list);
+    let frames: serde_json::Value = serde_json::from_slice(&list.stdout).expect("frame list");
+    assert_eq!(frames.as_array().unwrap().len(), 1);
+    assert_ok(&run(&dir, &["doctor", "--strict", "--file", file_arg]));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn help_mentions_task_affinity() {
     let dir = temp_dir("help");
     let output = run(&dir, &["--help"]);
