@@ -268,6 +268,62 @@ impl From<&crate::model::Memory> for BriefMemory {
 }
 
 #[derive(Serialize)]
+struct PackMemory {
+    id: String,
+    kind: String,
+    scope: String,
+    subject: String,
+    text: String,
+    source: String,
+}
+
+impl From<&crate::model::Memory> for PackMemory {
+    fn from(memory: &crate::model::Memory) -> Self {
+        Self {
+            id: memory.id.clone(),
+            kind: memory.kind.clone(),
+            scope: memory.scope.clone(),
+            subject: memory.subject.clone(),
+            text: memory.text.clone(),
+            source: memory.source.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AbsorbOp {
+    op: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    supersedes: Vec<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AbsorbOut {
+    ok: bool,
+    accepted: usize,
+    written: usize,
+    forgotten: usize,
+}
+
+#[derive(Serialize)]
 struct SimilarOut {
     id: String,
     candidates: Vec<CandidateOut>,
@@ -372,6 +428,8 @@ pub fn run() -> Result<()> {
         "govern" => cmd_govern(&arg_path(&args), &args),
         "audit" => cmd_audit(&arg_path(&args), &args),
         "brief" => cmd_brief(&arg_path(&args), &args),
+        "pack" => cmd_pack(&arg_path(&args), &args),
+        "absorb" => cmd_absorb(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -482,6 +540,8 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
+         cm pack [--task <id>|current] [--budget 1200] > pack.prompt
+         cm absorb --input result.jsonl
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -2283,6 +2343,254 @@ fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {
     Ok(total)
 }
 
+fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
+    let budget = arg_usize(args, "--budget", 1200);
+    let task_arg = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
+    let explicit_query = arg_value(args, "--query");
+    let mut store = Store::open(path)?;
+    let (frame, query, frame_tokens, task) = match latest_frame(&mut store, Some(&task_arg))? {
+        Some((memory, frame)) => {
+            let query = explicit_query
+                .or_else(|| frame_query(&frame))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "frame for task {:?} has no goal or next steps; pass --query",
+                        frame.task
+                    )
+                })?;
+            let value = frame_json(&memory, &frame);
+            let tokens = estimate_tokens(&serde_json::to_string(&value)?);
+            (Some(value), query, tokens, Some(frame.task))
+        }
+        None => {
+            let query = explicit_query.ok_or_else(|| {
+                anyhow!("no frame for this workspace; run cm frame set or pass --query")
+            })?;
+            (None, query, 0, (task_arg != "current").then_some(task_arg))
+        }
+    };
+    let memory_budget = budget.saturating_sub(frame_tokens);
+    let (mut selected, _) = select_context(
+        &mut store,
+        &query,
+        memory_budget,
+        arg_usize(args, "--top", 16),
+        arg_value(args, "--scope"),
+        task,
+        None,
+        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
+        arg_usize(args, "--max-items", 8),
+        0.0,
+        true,
+    )?;
+    let feedback = collect_feedback_stats(&mut store, 1024)?;
+    selected.retain(|memory| {
+        feedback
+            .get(&memory.id)
+            .is_none_or(|stats| !(stats.wrong >= 2 || (stats.stale >= 2 && stats.useful == 0)))
+    });
+    outln!("You are compressing cm memory context for a coding agent.");
+    outln!("Return only JSONL, one object per line. No markdown, no prose.");
+    outln!("Use the supplied memories as evidence. Do not invent sources.");
+    outln!("If nothing is worth storing, return an empty response.");
+    outln!("");
+    outln!("CONTEXT");
+    outln!("QUERY: {query}", query = query);
+    if let Some(frame) = &frame {
+        outln!("TASK");
+        outln!("{}", serde_json::to_string(frame)?);
+    }
+    outln!("MEMORIES");
+    for memory in &selected {
+        outln!("{}", serde_json::to_string(&PackMemory::from(memory))?);
+    }
+    outln!("");
+    outln!("OUTPUT");
+    outln!("One JSONL object per line, exactly one of:");
+    outln!("{{\"op\":\"remember\",\"kind\":\"fact|decision|preference|constraint|episode|procedure\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"<=800 chars\",\"source\":\"path:symbol|agent:<name>\",\"evidence\":[\"<memory-id>\"],\"confidence\":0.0}}");
+    outln!("{{\"op\":\"supersede\",\"kind\":\"...\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"...\",\"source\":\"...\",\"supersedes\":[\"<memory-id>\"],\"evidence\":[\"<memory-id>\"]}}");
+    outln!("{{\"op\":\"forget\",\"id\":\"<memory-id>\",\"reason\":\"...\"}}");
+    outln!("");
+    outln!("Rules: evidence is required for remember and supersede. Never create kind=frame or kind=feedback. Never invent a source path or symbol.");
+    Ok(())
+}
+
+fn parse_absorb_ops(content: &str) -> Result<Vec<AbsorbOp>> {
+    let mut ops = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line == "```" || line == "```json" {
+            continue;
+        }
+        let op: AbsorbOp = serde_json::from_str(line)
+            .with_context(|| format!("line {}: invalid JSONL", index + 1))?;
+        ops.push(op);
+    }
+    Ok(ops)
+}
+
+fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp]) -> Result<()> {
+    let mut superseded = HashSet::new();
+    for (index, op) in ops.iter().enumerate() {
+        let line = index + 1;
+        match op.op.as_str() {
+            "remember" | "supersede" => {
+                let kind = op
+                    .kind
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("line {line}: kind is required"))?;
+                let scope = op
+                    .scope
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("line {line}: scope is required"))?;
+                if scope.trim().is_empty() {
+                    bail!("line {line}: scope must not be empty");
+                }
+                let subject = op
+                    .subject
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("line {line}: subject is required"))?;
+                if subject.trim().is_empty() {
+                    bail!("line {line}: subject must not be empty");
+                }
+                let text = op
+                    .text
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("line {line}: text is required"))?;
+                if text.trim().is_empty() {
+                    bail!("line {line}: text must not be empty");
+                }
+                let source = op
+                    .source
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("line {line}: source is required"))?;
+                if source.trim().is_empty() {
+                    bail!("line {line}: source must not be empty");
+                }
+                if matches!(kind, "frame" | "feedback") {
+                    bail!("line {line}: kind {kind:?} is reserved");
+                }
+                if scope.starts_with("__cm_") {
+                    bail!("line {line}: scope {scope:?} is reserved");
+                }
+                if text.chars().count() > 800 {
+                    bail!("line {line}: text must be <=800 chars");
+                }
+                if op.evidence.is_empty() {
+                    bail!("line {line}: evidence is required");
+                }
+                for id in &op.evidence {
+                    if !active_memory_exists(store, id)? {
+                        bail!("line {line}: evidence memory not found: {id}");
+                    }
+                }
+                if let Some(reason) = &op.reason {
+                    if reason.chars().count() > 200 {
+                        bail!("line {line}: reason must be <=200 chars");
+                    }
+                }
+                if op.op == "supersede" {
+                    let mut targets = op.supersedes.clone();
+                    if let Some(id) = &op.id {
+                        targets.push(id.clone());
+                    }
+                    if targets.is_empty() {
+                        bail!("line {line}: supersede requires supersedes or id");
+                    }
+                    for id in targets {
+                        if !superseded.insert(id.clone()) {
+                            bail!("line {line}: memory {id} is superseded more than once");
+                        }
+                        if !active_memory_exists(store, &id)? {
+                            bail!("line {line}: superseded memory not found: {id}");
+                        }
+                    }
+                }
+                if source_parts(source).is_some() && source_anchor(source).is_none() {
+                    bail!("line {line}: source does not anchor: {source:?}");
+                }
+            }
+            "forget" => {
+                let Some(id) = op.id.as_deref() else {
+                    bail!("line {line}: forget requires id");
+                };
+                if !active_memory_exists(store, id)? {
+                    bail!("line {line}: active memory not found: {id}");
+                }
+            }
+            other => bail!("line {line}: invalid op {other:?}; expected remember/supersede/forget"),
+        }
+    }
+    Ok(())
+}
+
+fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<serde_json::Value> {
+    match op.op.as_str() {
+        "remember" | "supersede" => {
+            let mut supersedes = op.supersedes.clone();
+            if let Some(id) = &op.id {
+                supersedes.push(id.clone());
+            }
+            let input = AppendInput {
+                kind: op.kind.clone().unwrap_or_default(),
+                scope: op.scope.clone().unwrap_or_default(),
+                subject: op.subject.clone().unwrap_or_default(),
+                text: op.text.clone().unwrap_or_default(),
+                source: op.source.clone().unwrap_or_default(),
+                confidence: op.confidence.unwrap_or(0.8).clamp(0.0, 1.0),
+                valid_from: 0,
+                valid_to: None,
+                supersedes,
+                conflict_of: None,
+                trust: Some("authored".to_string()),
+                source_commit: None,
+            };
+            let memory = memory_from_input(&input)?;
+            append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+            Ok(json!({"op": op.op, "id": memory.id}))
+        }
+        "forget" => {
+            let id = op.id.clone().unwrap_or_default();
+            append_tombstone(path, &id, op.reason.as_deref().unwrap_or("absorb"))?;
+            Ok(json!({"op": "forget", "id": id}))
+        }
+        other => bail!("invalid op {other:?}"),
+    }
+}
+
+fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
+    let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
+    let content = if input == "-" {
+        io::read_to_string(io::stdin())?
+    } else {
+        fs::read_to_string(&input)?
+    };
+    let ops = parse_absorb_ops(&content)?;
+    let mut store = Store::open(path)?;
+    validate_absorb_ops(&mut store, &ops)?;
+    drop(store);
+    let mut written = 0usize;
+    let mut forgotten = 0usize;
+    for op in &ops {
+        if matches!(op.op.as_str(), "remember" | "supersede") {
+            written += 1;
+        } else {
+            forgotten += 1;
+        }
+        apply_absorb_op(path, op)?;
+    }
+    outln!(
+        "{}",
+        serde_json::to_string(&AbsorbOut {
+            ok: true,
+            accepted: ops.len(),
+            written,
+            forgotten,
+        })?
+    );
+    Ok(())
+}
+
 fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Result<()> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
@@ -2404,19 +2712,26 @@ fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_forget(path: &Path, id: &str) -> Result<()> {
-    let mut store = Store::open(path)?;
+fn active_memory_exists(store: &mut Store, id: &str) -> Result<bool> {
     let tail = store.tail_view()?;
-    let exists =
-        !tail.hidden.contains(id) && (store.find_doc(id)?.is_some() || tail.get(id).is_some());
-    if !exists {
-        bail!("active memory not found: {id}");
-    }
+    Ok(!tail.hidden.contains(id) && (store.find_doc(id)?.is_some() || tail.get(id).is_some()))
+}
+
+fn append_tombstone(path: &Path, id: &str, reason: &str) -> Result<()> {
     let mut payload = Vec::new();
     put_text(&mut payload, 1, id);
-    put_text(&mut payload, 2, "user_request");
+    put_text(&mut payload, 2, reason);
     put_u64(&mut payload, 3, crate::model::now_ms());
     append_record(path, 4, &payload, false)?;
+    Ok(())
+}
+
+pub(crate) fn cmd_forget(path: &Path, id: &str) -> Result<()> {
+    let mut store = Store::open(path)?;
+    if !active_memory_exists(&mut store, id)? {
+        bail!("active memory not found: {id}");
+    }
+    append_tombstone(path, id, "user_request")?;
     outln!("{}", json!({"ok": true, "target": id}));
     Ok(())
 }

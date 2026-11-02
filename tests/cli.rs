@@ -792,6 +792,98 @@ fn brief_resumes_current_frame_with_budgeted_context() {
 }
 
 #[test]
+fn pack_and_absorb_compress_memories() {
+    let dir = temp_dir("pack-absorb");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Summarize cache",
+        ],
+    ));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "cache policy",
+            "--text",
+            "Cache protects the active scope and uses TinyLFU admission.",
+            "--scope",
+            "repo",
+            "--source",
+            "agent:test",
+        ],
+    );
+    assert_ok(&remembered);
+    let evidence = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pack = run(
+        &dir,
+        &[
+            "pack", "--file", file_arg, "--task", "T1", "--budget", "800",
+        ],
+    );
+    assert_ok(&pack);
+    let prompt = String::from_utf8_lossy(&pack.stdout);
+    assert!(prompt.contains("Return only JSONL"), "{prompt}");
+    assert!(prompt.contains(&evidence), "{prompt}");
+
+    let result = format!(
+        "{{\"op\":\"remember\",\"kind\":\"decision\",\"scope\":\"repo\",\"subject\":\"cache policy\",\"text\":\"Cache keeps the active scope hot and rejects one-off blocks.\",\"source\":\"agent:llm\",\"evidence\":[\"{evidence}\"],\"confidence\":0.8}}\n"
+    );
+    let result_path = dir.join("result.jsonl");
+    fs::write(&result_path, result).expect("write result");
+    let absorb = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+        ],
+    );
+    assert_ok(&absorb);
+    let report: serde_json::Value = serde_json::from_slice(&absorb.stdout).expect("absorb json");
+    assert_eq!(report["written"], 1);
+
+    let bad = "{\"op\":\"remember\",\"kind\":\"fact\",\"scope\":\"repo\",\"subject\":\"bad\",\"text\":\"bad memory\",\"source\":\"agent:llm\",\"evidence\":[\"missing\"]}\n";
+    let bad_path = dir.join("bad.jsonl");
+    fs::write(&bad_path, bad).expect("write bad result");
+    let rejected = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            bad_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !rejected.status.success(),
+        "missing evidence must be rejected"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn brief_inlines_source_snippet() {
     let dir = temp_dir("brief-snippet");
     let file = dir.join("cm");

@@ -99,6 +99,21 @@ $CM remember --file "$F" --kind decision --scope <scope> \
 - If a later decision invalidates an earlier one, pass `--supersedes <id>`; keep both only on a real conflict (run `cm conflicts`).
 - Never store raw transcripts, secrets, or long code blocks.
 
+## Compress
+
+When many raw notes or long exploration results must become durable memory, use
+the external-model loop:
+
+```bash
+$CM pack --file "$F" --task current --budget 1200 > pack.prompt
+# send pack.prompt to the model, save strict JSONL as result.jsonl
+$CM absorb --file "$F" --input result.jsonl
+```
+
+`absorb` accepts only `remember`, `supersede`, and `forget`; every write needs
+evidence IDs from the pack and a real `path:symbol` or `agent:<name>` source.
+The model proposes; `cm` verifies and stores.
+
 ## Maintain
 
 ```bash
