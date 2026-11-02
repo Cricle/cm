@@ -792,6 +792,73 @@ fn brief_resumes_current_frame_with_budgeted_context() {
 }
 
 #[test]
+fn brief_inlines_source_snippet() {
+    let dir = temp_dir("brief-snippet");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(
+        dir.join("src").join("foo.rs"),
+        "pub fn hello() {\n    println!(\"hi\");\n}\n",
+    )
+    .expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Explain hello",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello",
+            "--text",
+            "hello function prints hi",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
+    let root_arg = dir.to_str().unwrap();
+    let brief = run(
+        &dir,
+        &[
+            "brief",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--budget",
+            "500",
+            "--format",
+            "prompt",
+            "--snippets",
+            "4",
+            "--root",
+            root_arg,
+        ],
+    );
+    assert_ok(&brief);
+    let output = String::from_utf8_lossy(&brief.stdout);
+    assert!(output.contains("snippet:"), "{output}");
+    assert!(output.contains("pub fn hello()"), "{output}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn help_mentions_task_affinity() {
     let dir = temp_dir("help");
     let output = run(&dir, &["--help"]);

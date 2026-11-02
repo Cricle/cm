@@ -56,7 +56,7 @@ remains the project-local installation path.
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
-cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt]
+cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
 cm release --file cm --task <task>|current [--owner <id>]
 cm finish --file cm [--task <task>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -130,7 +130,7 @@ cm cache-stats [--file cm]
 cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--next <text>]... [--open <text>]... [--touch <path>]...
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
-cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
+cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]

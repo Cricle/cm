@@ -248,6 +248,8 @@ struct BriefMemory {
     source_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
 }
 
 impl From<&crate::model::Memory> for BriefMemory {
@@ -260,6 +262,7 @@ impl From<&crate::model::Memory> for BriefMemory {
             source: memory.source.clone(),
             source_line: memory.source_line,
             source_commit: memory.source_commit.clone(),
+            snippet: None,
         }
     }
 }
@@ -478,7 +481,7 @@ fn print_usage() {
          cm frame set --task <id> --goal <text> [--next <text>] [--open <text>]
          cm frame get --task <id>
          cm frame list
-         cm brief [--task <id>|current] [--budget 1200] [--format json|prompt]
+         cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -1460,7 +1463,7 @@ fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
 fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
     if let Some(symbol) = symbol {
         let lines: Vec<&str> = text.lines().collect();
-        let index = lines.iter().position(|line| line.contains(symbol))?;
+        let index = find_symbol_line(&lines, symbol)?;
         let start = index.saturating_sub(2);
         let end = (index + 40).min(lines.len());
         let excerpt = lines[start..end].join("\n");
@@ -1473,11 +1476,60 @@ fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
     }
 }
 
+fn find_symbol_line(lines: &[&str], symbol: &str) -> Option<usize> {
+    let definitions = [
+        "fn ",
+        "pub fn ",
+        "struct ",
+        "pub struct ",
+        "enum ",
+        "pub enum ",
+        "trait ",
+        "pub trait ",
+        "impl ",
+        "class ",
+        "def ",
+        "function ",
+        "const ",
+        "pub const ",
+        "static ",
+    ];
+    let matches: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(symbol))
+        .map(|(index, _)| index)
+        .collect();
+    for &index in &matches {
+        let line = lines[index].trim_start();
+        if definitions.iter().any(|prefix| {
+            line.strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(symbol))
+        }) {
+            return Some(index);
+        }
+    }
+    matches.into_iter().next()
+}
+
 fn source_anchor(source: &str) -> Option<(u32, String)> {
     let (relative, symbol) = source_parts(source)?;
     let root = std::env::current_dir().ok()?;
     let text = fs::read_to_string(root.join(relative)).ok()?;
     anchor_text(&text, symbol.as_deref())
+}
+
+fn source_snippet(memory: &crate::model::Memory, root: &Path, lines: usize) -> Option<String> {
+    let (relative, _) = source_parts(&memory.source)?;
+    let text = fs::read_to_string(root.join(relative)).ok()?;
+    let all: Vec<&str> = text.lines().collect();
+    if all.is_empty() {
+        return None;
+    }
+    let anchor = memory.source_line.unwrap_or(1) as usize;
+    let start = anchor.saturating_sub(1).saturating_sub(2);
+    let end = (start + lines.max(1)).min(all.len());
+    Some(all[start..end].join("\n"))
 }
 
 fn audit_source_issue(
@@ -1975,6 +2027,8 @@ fn select_context(
 fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     let budget = arg_usize(args, "--budget", 1200);
     let format = arg_value(args, "--format").unwrap_or_else(|| "json".to_string());
+    let snippet_lines = arg_usize(args, "--snippets", 0);
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let task_arg = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
     let explicit_query = arg_value(args, "--query");
     let mut store = Store::open(path)?;
@@ -2014,6 +2068,11 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         true,
     )?;
     let mut memories: Vec<BriefMemory> = selected.iter().map(BriefMemory::from).collect();
+    if snippet_lines > 0 {
+        for (memory, brief) in selected.iter().zip(memories.iter_mut()) {
+            brief.snippet = source_snippet(memory, &root, snippet_lines);
+        }
+    }
     let mut memory_tokens = json_tokens(&memories)?;
     while !memories.is_empty() && frame_tokens + memory_tokens > budget {
         memories.pop();
@@ -2095,6 +2154,11 @@ fn brief_prompt(
                 out.push(':');
                 out.push_str(&line.to_string());
             }
+            out.push('\n');
+        }
+        if let Some(snippet) = &memory.snippet {
+            out.push_str("snippet:\n");
+            out.push_str(snippet);
             out.push('\n');
         }
         out.push('\n');
