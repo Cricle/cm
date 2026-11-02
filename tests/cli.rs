@@ -859,6 +859,63 @@ fn brief_inlines_source_snippet() {
 }
 
 #[test]
+fn brief_suppresses_repeatedly_wrong_memories() {
+    let dir = temp_dir("brief-feedback");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "bad fact",
+            "--text",
+            "this fact is wrong",
+            "--scope",
+            "repo",
+            "--source",
+            "agent:test",
+        ],
+    );
+    assert_ok(&remembered);
+    let id = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for _ in 0..2 {
+        assert_ok(&run(
+            &dir,
+            &[
+                "feedback", "--file", file_arg, "--id", &id, "--signal", "wrong",
+            ],
+        ));
+    }
+    let brief = run(
+        &dir,
+        &[
+            "brief",
+            "--file",
+            file_arg,
+            "--query",
+            "wrong fact",
+            "--budget",
+            "500",
+        ],
+    );
+    assert_ok(&brief);
+    let report: serde_json::Value = serde_json::from_slice(&brief.stdout).expect("brief json");
+    assert!(
+        report["memories"].as_array().unwrap().is_empty(),
+        "repeatedly wrong memory must be suppressed: {report}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn help_mentions_task_affinity() {
     let dir = temp_dir("help");
     let output = run(&dir, &["--help"]);

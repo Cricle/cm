@@ -83,7 +83,9 @@ relevant memories in one JSON object, and tags the cache working set with that
 task. Use an explicit task id when several tasks are active. If no frame exists,
 pass `--query` to get a plain budgeted brief. `--format prompt` emits a compact
 text block intended to be injected into the model prompt before the first tool
-call, eliminating the brief tool turn entirely.
+call, eliminating the brief tool turn entirely. Memories with repeated `wrong`
+feedback or repeated `stale` feedback without `useful` signals are suppressed
+from the brief until `govern --apply` forgets them.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together

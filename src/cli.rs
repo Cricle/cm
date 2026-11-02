@@ -884,6 +884,51 @@ fn collect_frames(store: &mut Store, limit: usize) -> Result<Vec<crate::model::M
     Ok(frames)
 }
 
+fn collect_feedback_stats(
+    store: &mut Store,
+    limit: usize,
+) -> Result<HashMap<String, FeedbackStats>> {
+    let scope_id = store.scope_id(FEEDBACK_SCOPE)?;
+    let kind = kind_id(FEEDBACK_KIND);
+    let tail = store.tail_view()?;
+    let mut hits: HashMap<String, crate::model::Memory> = HashMap::new();
+    if scope_id.is_some() {
+        for (doc_idx, _) in store.bm25("feedback", scope_id, kind, None, None, limit.min(512))? {
+            let meta = store.doc_meta(doc_idx)?;
+            let memory = store.doc_memory(&meta)?;
+            if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("feedback:") {
+                hits.insert(memory.id.clone(), memory);
+            }
+        }
+    }
+    for (_, memory) in tail.bm25(
+        "feedback",
+        Some(FEEDBACK_SCOPE),
+        Some(FEEDBACK_KIND),
+        None,
+        limit.min(512),
+    ) {
+        if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("feedback:") {
+            hits.insert(memory.id.clone(), memory);
+        }
+    }
+    let mut stats: HashMap<String, FeedbackStats> = HashMap::new();
+    for memory in hits.into_values() {
+        let Ok(item) = serde_json::from_str::<Feedback>(&memory.text) else {
+            continue;
+        };
+        let entry = stats.entry(item.target).or_default();
+        match item.signal.as_str() {
+            "useful" => entry.useful += 1,
+            "stale" => entry.stale += 1,
+            "wrong" => entry.wrong += 1,
+            _ => {}
+        }
+        entry.last = entry.last.max(item.updated_at);
+    }
+    Ok(stats)
+}
+
 fn latest_frame(
     store: &mut Store,
     task: Option<&str>,
@@ -2054,7 +2099,7 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         }
     };
     let memory_budget = budget.saturating_sub(frame_tokens);
-    let (selected, _) = select_context(
+    let (mut selected, _) = select_context(
         &mut store,
         &query,
         memory_budget,
@@ -2067,6 +2112,12 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         0.0,
         true,
     )?;
+    let feedback = collect_feedback_stats(&mut store, 1024)?;
+    selected.retain(|memory| {
+        feedback
+            .get(&memory.id)
+            .is_none_or(|stats| !(stats.wrong >= 2 || (stats.stale >= 2 && stats.useful == 0)))
+    });
     let mut memories: Vec<BriefMemory> = selected.iter().map(BriefMemory::from).collect();
     if snippet_lines > 0 {
         for (memory, brief) in selected.iter().zip(memories.iter_mut()) {
