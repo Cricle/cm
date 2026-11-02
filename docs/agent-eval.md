@@ -30,7 +30,8 @@ For a multi-step coding task:
 2. `cm recall --task <id>` before implementation.
 3. At decisions: write one `cm remember` record and update the frame.
 4. Mark only materially useful/wrong memories with `cm feedback`.
-5. At the end: `cm frame set --task <id> --status done`, then `cm govern`.
+5. At the end: `cm frame set --task <id> --status done`, `cm audit --root . --apply`,
+   then `cm govern`.
 
 Track task success, turns, tokens, repeated file reads, and whether the frame's
 next steps stayed current. Compare against the same task with memory disabled.

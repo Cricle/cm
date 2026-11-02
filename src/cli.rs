@@ -315,6 +315,7 @@ pub fn run() -> Result<()> {
         "frame" => cmd_frame(&arg_path(&args), &args),
         "feedback" | "use" => cmd_feedback(&arg_path(&args), &args),
         "govern" => cmd_govern(&arg_path(&args), &args),
+        "audit" => cmd_audit(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -434,6 +435,7 @@ fn print_usage() {
          cm frame list
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
+         cm audit [--root <dir>] [--apply]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -952,6 +954,39 @@ fn cmd_frame_list(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_feedback(
+    path: &Path,
+    id: &str,
+    signal: &str,
+    note: Option<&str>,
+    source: &str,
+) -> Result<()> {
+    let now = crate::model::now_ms();
+    let feedback = Feedback {
+        target: id.to_string(),
+        signal: signal.to_string(),
+        note: note.map(str::to_string),
+        updated_at: now,
+    };
+    let input = AppendInput {
+        kind: FEEDBACK_KIND.to_string(),
+        scope: FEEDBACK_SCOPE.to_string(),
+        subject: format!("feedback:{id}"),
+        text: serde_json::to_string(&feedback)?,
+        source: source.to_string(),
+        confidence: 1.0,
+        valid_from: now,
+        valid_to: None,
+        supersedes: Vec::new(),
+        conflict_of: None,
+        trust: Some("authored".to_string()),
+        source_commit: None,
+    };
+    let memory = memory_from_input(&input)?;
+    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    Ok(())
+}
+
 fn cmd_feedback(path: &Path, args: &[String]) -> Result<()> {
     let ids = arg_values(args, "--id");
     if ids.is_empty() {
@@ -962,31 +997,9 @@ fn cmd_feedback(path: &Path, args: &[String]) -> Result<()> {
         bail!("invalid feedback signal {signal:?}; expected useful/stale/wrong");
     }
     let note = arg_value(args, "--note");
-    let now = crate::model::now_ms();
     let source = arg_value(args, "--source").unwrap_or_else(|| "agent".to_string());
     for id in &ids {
-        let feedback = Feedback {
-            target: id.clone(),
-            signal: signal.clone(),
-            note: note.clone(),
-            updated_at: now,
-        };
-        let input = AppendInput {
-            kind: FEEDBACK_KIND.to_string(),
-            scope: FEEDBACK_SCOPE.to_string(),
-            subject: format!("feedback:{id}"),
-            text: serde_json::to_string(&feedback)?,
-            source: source.clone(),
-            confidence: 1.0,
-            valid_from: now,
-            valid_to: None,
-            supersedes: Vec::new(),
-            conflict_of: None,
-            trust: Some("authored".to_string()),
-            source_commit: None,
-        };
-        let memory = memory_from_input(&input)?;
-        append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+        write_feedback(path, id, &signal, note.as_deref(), &source)?;
     }
     outln!(
         "{}",
@@ -1139,6 +1152,93 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
             "merged_groups": merged_groups,
             "suggestions": suggestions,
             "forgotten": forgotten
+        }))?
+    );
+    Ok(())
+}
+
+fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
+    let source = source.trim();
+    if source.is_empty() || source.starts_with("agent:") || source.contains("://") {
+        return None;
+    }
+    if let Some((path, symbol)) = source.rsplit_once(':') {
+        if path.len() > 1
+            && !symbol.is_empty()
+            && (path.contains('/') || path.contains('\\') || path.contains('.'))
+        {
+            return Some((PathBuf::from(path), Some(symbol.to_string())));
+        }
+    }
+    let path = PathBuf::from(source);
+    let pathish = source.contains('/') || source.contains('\\') || source.contains('.');
+    if pathish {
+        Some((path, None))
+    } else {
+        None
+    }
+}
+
+fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
+    let apply = has_flag(args, "--apply");
+    let mut store = Store::open(path)?;
+    let memories = active_memories(&mut store)?;
+    let now = crate::model::now_ms();
+    let mut checked = 0usize;
+    let mut issues = Vec::new();
+    for memory in &memories {
+        if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
+            continue;
+        }
+        let Some((relative, symbol)) = source_parts(&memory.source) else {
+            continue;
+        };
+        checked += 1;
+        let full = root.join(&relative);
+        let issue = if !full.exists() {
+            Some("missing_source")
+        } else if let Some(symbol) = symbol.as_deref() {
+            match fs::read_to_string(&full) {
+                Ok(text) if text.contains(symbol) => None,
+                Ok(_) => Some("missing_symbol"),
+                Err(_) => Some("unreadable_source"),
+            }
+        } else {
+            None
+        };
+        let Some(issue) = issue else {
+            continue;
+        };
+        let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
+        issues.push(json!({
+            "id": memory.id,
+            "source": memory.source,
+            "path": full.display().to_string(),
+            "issue": issue,
+            "age_days": age_days
+        }));
+    }
+    if apply {
+        for issue in &issues {
+            let Some(id) = issue["id"].as_str() else {
+                continue;
+            };
+            let reason = issue["issue"].as_str().unwrap_or("source drift");
+            write_feedback(path, id, "stale", Some(reason), "audit")?;
+        }
+    }
+    let total = issues.len();
+    issues.truncate(500);
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ok": true,
+            "root": root.display().to_string(),
+            "checked": checked,
+            "issues": issues,
+            "issue_count": total,
+            "apply": apply
         }))?
     );
     Ok(())

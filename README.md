@@ -86,9 +86,11 @@ next steps, open questions, and touched paths as a normal memory record; updates
 supersede the previous frame. `feedback` records useful/stale/wrong signals;
 `govern` turns them into verify/forget suggestions, auto-forgets exact
 duplicates with `--apply`, and folds near-duplicates when `--merge` is set.
-Source paths are part of the BM25 token stream, so file/symbol queries work
-without embeddings. Read commands may create or update the disposable
-`cm.cache` cache; `cm` remains unchanged.
+`audit --root <repo>` checks that each `path:symbol` source still exists and
+contains the symbol; `--apply` records stale feedback for drift, which `govern`
+then surfaces. Source paths are part of the BM25 token stream, so file/symbol
+queries work without embeddings. Read commands may create or update the
+disposable `cm.cache` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -107,6 +109,7 @@ cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
+cm audit --root <repo> [--apply] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]

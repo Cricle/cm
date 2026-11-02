@@ -209,6 +209,52 @@ fn governance_removes_exact_duplicates_and_search_matches_sources() {
 }
 
 #[test]
+fn audit_detects_source_drift_and_feeds_governance() {
+    let dir = temp_dir("audit");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    let root = dir.join("root");
+    fs::create_dir_all(root.join("src")).expect("create source tree");
+    let source = root.join("src").join("foo.rs");
+    fs::write(&source, "fn hello() {}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "foo",
+            "--text",
+            "hello function",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
+    let root_arg = root.to_str().unwrap();
+    let clean = run(&dir, &["audit", "--file", file_arg, "--root", root_arg]);
+    assert_ok(&clean);
+    let report: serde_json::Value = serde_json::from_slice(&clean.stdout).expect("audit json");
+    assert_eq!(report["issue_count"], 0);
+    fs::remove_file(&source).expect("remove source");
+    let dirty = run(
+        &dir,
+        &["audit", "--file", file_arg, "--root", root_arg, "--apply"],
+    );
+    assert_ok(&dirty);
+    let report: serde_json::Value = serde_json::from_slice(&dirty.stdout).expect("audit json");
+    assert_eq!(report["issue_count"], 1);
+    let govern = run(&dir, &["govern", "--file", file_arg, "--stale-days", "0"]);
+    assert_ok(&govern);
+    let report: serde_json::Value = serde_json::from_slice(&govern.stdout).expect("govern json");
+    assert_eq!(report["suggestions"][0]["action"], "verify");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn governance_merges_near_duplicates() {
     let dir = temp_dir("merge");
     let file = dir.join("cm");
