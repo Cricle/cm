@@ -75,7 +75,8 @@ usually fit in 800 tokens. Use `--full` for complete text on every hit.
 stable id for the current work item (branch, issue, or agent task) so `cm.cache`
 keeps the blocks read by this task; `--scope` remains the durable workspace
 affinity. Result blocks are prefetched into that working set after a query.
-When `--query` is omitted, `recall` uses the task frame's goal and next steps.
+When `--query` is omitted, `recall` uses the task frame's goal, next steps, open
+questions, and touched paths.
 
 `brief` is the session-resume entry point. With `--task current` it picks the
 most recently updated active frame, emits the frame plus a budgeted set of

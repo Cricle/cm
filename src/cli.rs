@@ -957,6 +957,7 @@ fn frame_query(frame: &TaskFrame) -> Option<String> {
     let mut parts = vec![frame.goal.clone()];
     parts.extend(frame.next.iter().cloned());
     parts.extend(frame.open.iter().cloned());
+    parts.extend(frame.touches.iter().cloned());
     parts.retain(|part| !part.trim().is_empty());
     if parts.is_empty() {
         None
