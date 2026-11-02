@@ -1496,7 +1496,7 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
     drop(header_file);
     drop(store);
 
-    let cache_path = path.with_file_name("cm.lru");
+    let cache_path = crate::cache::cache_path(path);
     if cache_path.exists() {
         fs::remove_file(&cache_path).ok();
     }

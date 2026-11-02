@@ -1235,7 +1235,7 @@ fn cmd_doctor(path: &Path) -> Result<bool> {
         warnings.push(error);
     }
 
-    let cache_bytes = fs::metadata(path.with_file_name("cm.lru"))
+    let cache_bytes = fs::metadata(crate::cache::cache_path(path))
         .map(|meta| meta.len())
         .unwrap_or(0);
     let ok = store_ok && conflicts == 0 && expired == 0 && full_checksum;

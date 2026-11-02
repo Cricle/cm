@@ -8,7 +8,7 @@ agents**. It is a hot-discovery index for source-grounded project knowledge,
 not a universal knowledge base.
 
 One file holds an append-only data log, a compressed BM25/MinHash index, and an
-optional disposable `cm.lru` cache. It is not Markdown and not a database
+optional disposable `cm.cache` cache. It is not Markdown and not a database
 server. Writers coordinate through a disposable `cm.lock`; it contains no
 memory data. See [positioning](docs/positioning.md) for the target scope and
 non-goals.
@@ -52,7 +52,7 @@ duplicate; `append`/`import` never deduplicate. Large indexes use the cheap
 tail-only check to avoid decoding every record on each write.
 
 `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
-problem. Read commands may create or update the disposable `cm.lru` cache; `cm`
+problem. Read commands may create or update the disposable `cm.cache` cache; `cm`
 remains unchanged.
 
 ## Advanced commands
@@ -125,7 +125,7 @@ cm skill --install
 ```
 
 The skill covers recall-before-work, compact write-back, source citations, and
-`cm.lru` maintenance. It is stored in the repository at `assets/SKILL.md` and
+`cm.cache` maintenance. It is stored in the repository at `assets/SKILL.md` and
 installed by default to `.agents/skills/cm-memory`.
 
 ## Accuracy
@@ -155,7 +155,7 @@ regression checks, not as a general accuracy claim.
 
 ## Design
 
-- Single memory file `cm`; optional disposable `cm.lru` cache and `cm.lock` writer lock.
+- Single memory file `cm`; optional disposable `cm.cache` cache and `cm.lock` writer lock.
 - Append-only data log with 64 KiB compressed blocks.
 - Compressed deterministic index; BM25 candidate retrieval; MinHash verification.
 - `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.

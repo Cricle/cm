@@ -48,4 +48,4 @@ $CM status --file "$F"
 $CM forget --file "$F" --id <id>
 ```
 
-`cm.lru` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.
+`cm.cache` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.

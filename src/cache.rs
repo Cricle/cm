@@ -253,8 +253,8 @@ impl Cache {
     }
 }
 
-fn cache_path(store_path: &Path) -> PathBuf {
-    store_path.with_file_name("cm.lru")
+pub(crate) fn cache_path(store_path: &Path) -> PathBuf {
+    store_path.with_file_name("cm.cache")
 }
 
 fn temp_cache_path(path: &Path) -> PathBuf {
@@ -262,7 +262,7 @@ fn temp_cache_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cm.lru".to_string());
+        .unwrap_or_else(|| "cm.cache".to_string());
     path.with_file_name(format!(
         "{name}.tmp.{}.{}",
         std::process::id(),
