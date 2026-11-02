@@ -1319,6 +1319,18 @@ pub(crate) fn append_record(
     // byte-range lock on the store itself: on Windows that makes concurrent
     // lock-free header reads fail with ERROR_LOCK_VIOLATION.
     let _store_lock = acquire_store_lock(path)?;
+    append_record_unlocked(path, rec_type, payload, durable)
+}
+
+/// Append while the caller already holds `acquire_store_lock`. Used by
+/// read-modify-write commands such as `claim`, where the frame check and the
+/// append must be one critical section.
+pub(crate) fn append_record_unlocked(
+    path: &Path,
+    rec_type: u8,
+    payload: &[u8],
+    durable: bool,
+) -> Result<()> {
     let mut file = OpenOptions::new().read(true).append(true).open(path)?;
     file.write_all(&encode_record(rec_type, 0, payload)?)?;
     if durable {

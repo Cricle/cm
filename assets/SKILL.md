@@ -60,6 +60,7 @@ $CM release --file "$F" --task current --owner <agent-id>
 ```
 
 `claim` rejects a live lease held by another owner; `finish` clears the lease.
+While the lease is live, `frame set` and `finish` require the matching `--owner`.
 
 ## Resume
 

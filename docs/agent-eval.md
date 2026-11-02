@@ -70,6 +70,23 @@ This is the intended profile: on a non-trivial task in a real repository, one
 brief replaces enough discovery turns to pay for itself. The boundary is task
 size, not memory size.
 
+## Multi-session A/B
+
+Same config_refactor task, split into two fresh agent sessions sharing the
+workspace. Session 1 only inspects and plans; session 2 applies the rename and
+runs tests. The with-cm condition keeps one store and runs one brief per session.
+
+| Mode | Session 1 | Session 2 | Total tokens | Tool uses | Wall time |
+|---|---:|---:|---:|---:|---:|
+| with cm | 80,715 | 122,495 | 203,210 | 18 | 67.4s |
+| without cm | 120,346 | 98,179 | 218,525 | 14 | 70.6s |
+
+Both modes succeeded. With cm saved 7.0% tokens and 4.5% wall time overall, but
+used 28.6% more tool calls. Session 1 benefited from the brief; session 2 paid
+more for the extra brief than it saved on this tiny repository. The honest
+conclusion: multi-session benefit is real but marginal here; it needs larger
+repositories and more than two sessions to dominate the fixed per-session brief
+cost.
 
 ## Why it is pure overhead
 

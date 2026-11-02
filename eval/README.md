@@ -51,8 +51,10 @@ python3 eval/agent_ab.py \
 ```
 
 Task fixtures live in `eval/tasks/<id>/`: `task.json`, `workspace/`,
-`memory.jsonl`, and `verify.py`. `scripted_fixture_agent.py` only smoke-tests the
-harness plumbing; do not report its numbers as model results.
+`memory.jsonl`, and `verify.py`. Add an optional `"sessions": ["prompt 1",
+"prompt 2"]` array to keep one workspace and one cm store across multiple agent
+sessions; the verifier runs once after the last session. `scripted_fixture_agent.py`
+only smoke-tests the harness plumbing; do not report its numbers as model results.
 
 ### Measured short-task A/B
 
@@ -110,4 +112,16 @@ One brief cut tokens by 62.0%, tool uses by 44.1%, and wall time by 49.8%. That
 is the intended use: non-trivial work in a real repository where discovery
 would otherwise cost multiple turns.
 
+### Multi-session A/B
 
+Same config_refactor task across two fresh sessions:
+
+| Mode | Session 1 | Session 2 | Total tokens | Tool uses | Wall time |
+|---|---:|---:|---:|---:|---:|
+| with cm | 80,715 | 122,495 | 203,210 | 18 | 67.4s |
+| without cm | 120,346 | 98,179 | 218,525 | 14 | 70.6s |
+
+Both succeeded. The brief helped session 1 but cost more than it saved in
+session 2 on this tiny repository; overall it was -7.0% tokens, -4.5% time, and
++28.6% tool uses. Multi-session value needs larger repos and longer sequences to
+overcome the fixed per-session brief cost.

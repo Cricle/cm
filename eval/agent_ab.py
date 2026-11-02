@@ -126,9 +126,26 @@ def seed_memory(cm: str, task: dict, workspace: Path) -> str:
     return str(memory)
 
 
-def task_prompt(cm: str, task: dict, mode: str, memory: str) -> str:
+def session_prompts(task: dict) -> list[str]:
+    sessions = task.get("sessions")
+    if not sessions:
+        return [task["prompt"]]
+    prompts = []
+    for session in sessions:
+        prompts.append(session["prompt"] if isinstance(session, dict) else session)
+    return prompts
+
+
+def task_prompt(
+    cm: str, task: dict, mode: str, memory: str, session_prompt: str, session_count: int
+) -> str:
     if mode == "without-cm":
-        return task["prompt"].strip() + "\n"
+        return session_prompt.strip() + "\n"
+    write_rule = (
+        "Write one cm record only when a non-obvious decision must survive into a later session. "
+        if session_count > 1
+        else "Do not write a cm record for a one-shot task. "
+    )
     return (
         "You are working in a repository with a cm memory sidecar.\n"
         f"cm binary: {cm}\n"
@@ -136,10 +153,10 @@ def task_prompt(cm: str, task: dict, mode: str, memory: str) -> str:
         "At session start run this exactly once:\n"
         f'  "{cm}" brief --file "{memory}" --task current --budget 1200\n\n'
         "Do not call `cm recall` in the same pass unless the brief is missing a "
-        "specific fact. Do not write a cm record for a one-shot task; write one "
-        "only when a non-obvious decision must survive into a later session.\n\n"
+        "specific fact. "
+        f"{write_rule}\n\n"
         "Task:\n"
-        f"{task['prompt'].strip()}\n"
+        f"{session_prompt.strip()}\n"
     )
 
 
@@ -169,54 +186,75 @@ def run_one(cm: str, task: dict, mode: str, run_idx: int, args: argparse.Namespa
     try:
         copy_task_workspace(task, workspace)
         memory = seed_memory(cm, task, workspace) if mode == "with-cm" else ""
-        prompt = task_prompt(cm, task, mode, memory)
-        prompt_file = workspace / ".cm-task-prompt.txt"
-        prompt_file.write_text(prompt, encoding="utf-8")
-        usage_file = workspace / ".cm-usage.json"
-        env = dict(os.environ)
-        env.update(
-            {
-                "CM_TASK_ID": task["id"],
-                "CM_WORKSPACE": str(workspace),
-                "CM_MEMORY": memory,
-                "CM_PROMPT": prompt,
-                "CM_PROMPT_FILE": str(prompt_file),
-                "CM_USAGE_FILE": str(usage_file),
-                "CM_MODE": mode,
-                "CM_BIN": cm,
-            }
-        )
-        command = args.agent_cmd.format(
-            cm=cm, workspace=workspace, memory=memory, prompt=prompt_file
-        )
+        prompts = session_prompts(task)
         started = time.perf_counter()
-        agent = subprocess.run(
-            command,
-            cwd=workspace,
-            env=env,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=args.timeout,
-            check=False,
-        )
+        usage_totals = {"tokens": 0, "turns": 0, "tool_calls": 0, "files_read": 0}
+        usage_missing = {key: False for key in usage_totals}
+        last_exit = 0
+        stdout_tail = ""
+        stderr_tail = ""
+        for session_idx, session_prompt in enumerate(prompts, 1):
+            prompt = task_prompt(cm, task, mode, memory, session_prompt, len(prompts))
+            prompt_file = workspace / f".cm-task-prompt-{session_idx}.txt"
+            prompt_file.write_text(prompt, encoding="utf-8")
+            usage_file = workspace / f".cm-usage-{session_idx}.json"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "CM_TASK_ID": task["id"],
+                    "CM_WORKSPACE": str(workspace),
+                    "CM_MEMORY": memory,
+                    "CM_PROMPT": prompt,
+                    "CM_PROMPT_FILE": str(prompt_file),
+                    "CM_USAGE_FILE": str(usage_file),
+                    "CM_MODE": mode,
+                    "CM_BIN": cm,
+                    "CM_SESSION": str(session_idx),
+                    "CM_SESSION_COUNT": str(len(prompts)),
+                }
+            )
+            command = args.agent_cmd.format(
+                cm=cm, workspace=workspace, memory=memory, prompt=prompt_file
+            )
+            agent = subprocess.run(
+                command,
+                cwd=workspace,
+                env=env,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=args.timeout,
+                check=False,
+            )
+            last_exit = agent.returncode
+            stdout_tail = agent.stdout.decode("utf-8", "replace")[-1000:]
+            stderr_tail = agent.stderr.decode("utf-8", "replace")[-1000:]
+            usage = read_usage(usage_file)
+            for key in usage_totals:
+                value = usage.get(key)
+                if isinstance(value, (int, float)):
+                    usage_totals[key] += value
+                else:
+                    usage_missing[key] = True
+            if agent.returncode != 0:
+                break
         elapsed = time.perf_counter() - started
         success = verify_task(task, workspace, args.timeout)
-        usage = read_usage(usage_file)
         row = {
             "task": task["id"],
             "mode": mode,
             "run": run_idx,
+            "sessions": len(prompts),
             "success": success,
-            "agent_exit": agent.returncode,
+            "agent_exit": last_exit,
             "seconds": round(elapsed, 3),
-            "tokens": usage.get("tokens"),
-            "turns": usage.get("turns"),
-            "tool_calls": usage.get("tool_calls"),
-            "files_read": usage.get("files_read"),
+            "tokens": None if usage_missing["tokens"] else usage_totals["tokens"],
+            "turns": None if usage_missing["turns"] else usage_totals["turns"],
+            "tool_calls": None if usage_missing["tool_calls"] else usage_totals["tool_calls"],
+            "files_read": None if usage_missing["files_read"] else usage_totals["files_read"],
             "workspace": str(workspace) if args.keep else None,
-            "stdout_tail": agent.stdout.decode("utf-8", "replace")[-1000:] if args.verbose else None,
-            "stderr_tail": agent.stderr.decode("utf-8", "replace")[-1000:] if args.verbose else None,
+            "stdout_tail": stdout_tail if args.verbose else None,
+            "stderr_tail": stderr_tail if args.verbose else None,
         }
         return row
     finally:

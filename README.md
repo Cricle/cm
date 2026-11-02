@@ -85,8 +85,10 @@ pass `--query` to get a plain budgeted brief.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
-with marking the frame done. `finish --summary ... --root <repo> --apply` also
-writes one episode summary and runs audit plus governance in the same command.
+with marking the frame done. A live lease also blocks `frame set` and `finish`
+unless the matching `--owner` is passed. `finish --summary ... --root <repo>
+--apply` also writes one episode summary and runs audit plus governance in the
+same command.
 
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
@@ -124,7 +126,7 @@ cm cache-stats [--file cm]
 cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--next <text>]... [--open <text>]... [--touch <path>]...
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
-cm brief --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust authored] [--query <text>]
+cm brief --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]
@@ -288,6 +290,20 @@ Working-set checks:
 - Agent A/B on the same read-only cache review: with one `cm recall` call the
   subagent used 307k tokens / 17 tool uses / 3 source files; without cm it used
   604k tokens / 26 tool uses / 5 files. Single run; model- and task-dependent.
+
+## Known limits
+
+- Short one-shot tasks pay 20–55% extra tokens/tools; use `cm` only when it can
+  replace at least two discovery turns.
+- Retrieval is lexical BM25 + MinHash. Paraphrases with no shared tokens are a
+  known miss; embeddings are deliberately not used.
+- `audit` detects missing sources, missing symbols, and excerpt-hash drift. It
+  does not prove that a claim is semantically true.
+- Task leases are cooperative: they prevent accidental duplicate work, not
+  malicious writers or distributed consensus.
+- Multi-session A/B on a small config task: -7.0% tokens and -4.5% wall time,
+  but +28.6% tool uses. Multi-session value needs larger repositories and more
+  than two sessions; short tasks remain a loss.
 
 ## Development
 

@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -321,6 +321,32 @@ fn claim_and_release_guard_a_task_frame() {
         ],
     );
     assert!(!blocked.status.success(), "second owner must be rejected");
+    let blocked_update = run(
+        &dir,
+        &[
+            "frame", "set", "--file", file_arg, "--task", "T1", "--note", "stolen",
+        ],
+    );
+    assert!(
+        !blocked_update.status.success(),
+        "frame update must respect a live lease"
+    );
+    let owned_update = run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--owner",
+            "agent-a",
+            "--note",
+            "owned update",
+        ],
+    );
+    assert_ok(&owned_update);
     let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
     assert_ok(&get);
     let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("frame json");
@@ -340,6 +366,41 @@ fn claim_and_release_guard_a_task_frame() {
         ],
     );
     assert_ok(&second);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn concurrent_claims_admit_exactly_one_owner() {
+    let dir = temp_dir("claim-race");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame", "set", "--file", file_arg, "--task", "T1", "--goal", "Race",
+        ],
+    ));
+    let mut children = Vec::new();
+    for owner in ["agent-a", "agent-b", "agent-c", "agent-d"] {
+        children.push(
+            Command::new(env!("CARGO_BIN_EXE_cm"))
+                .current_dir(&dir)
+                .args([
+                    "claim", "--file", file_arg, "--task", "T1", "--owner", owner, "--lease", "30",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn claim"),
+        );
+    }
+    let winners = children
+        .into_iter()
+        .map(|mut child| child.wait().expect("wait claim").success())
+        .filter(|success| *success)
+        .count();
+    assert_eq!(winners, 1, "concurrent claims must admit exactly one owner");
     fs::remove_dir_all(&dir).ok();
 }
 

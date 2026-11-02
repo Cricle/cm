@@ -942,12 +942,29 @@ fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::V
     })
 }
 
+fn ensure_frame_owner(frame: &TaskFrame, owner: Option<&str>, action: &str) -> Result<()> {
+    let now = crate::model::now_ms();
+    if let Some(existing) = frame.owner.as_deref() {
+        if frame.lease_until.is_some_and(|end| end > now) && owner != Some(existing) {
+            bail!(
+                "cannot {action} task {:?}: held by {} until {}; pass --owner {}",
+                frame.task,
+                existing,
+                frame.lease_until.unwrap_or(0),
+                existing
+            );
+        }
+    }
+    Ok(())
+}
+
 fn save_frame(
     path: &Path,
     frame: &TaskFrame,
     existing_id: Option<String>,
     source: &str,
     source_commit: Option<String>,
+    locked: bool,
 ) -> Result<crate::model::Memory> {
     let input = AppendInput {
         kind: FRAME_KIND.to_string(),
@@ -964,7 +981,16 @@ fn save_frame(
         source_commit,
     };
     let memory = memory_from_input(&input)?;
-    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    if locked {
+        crate::store::append_record_unlocked(
+            path,
+            crate::store::T_MEMORY,
+            &memory_payload(&memory),
+            true,
+        )?;
+    } else {
+        append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    }
     Ok(memory)
 }
 
@@ -975,6 +1001,13 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
         .into_iter()
         .find(|memory| memory.subject == frame_subject(&task));
     let existing_id = existing.as_ref().map(|memory| memory.id.clone());
+    if let Some(existing_frame) = existing.as_ref().and_then(parse_frame) {
+        ensure_frame_owner(
+            &existing_frame,
+            arg_value(args, "--owner").as_deref(),
+            "update",
+        )?;
+    }
     let mut frame = existing
         .as_ref()
         .and_then(parse_frame)
@@ -1022,6 +1055,7 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
         existing_id,
         &source,
         arg_value(args, "--source-commit"),
+        false,
     )?;
     outln!(
         "{}",
@@ -1060,6 +1094,7 @@ fn cmd_claim(path: &Path, args: &[String]) -> Result<()> {
     let owner = arg_value(args, "--owner").ok_or_else(|| anyhow!("claim requires --owner"))?;
     let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
     let lease_minutes = arg_usize(args, "--lease", 30).max(1) as u64;
+    let _lock = crate::store::acquire_store_lock(path)?;
     let mut store = Store::open(path)?;
     let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
         .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
@@ -1078,7 +1113,7 @@ fn cmd_claim(path: &Path, args: &[String]) -> Result<()> {
     frame.owner = Some(owner.clone());
     frame.lease_until = Some(lease_until);
     frame.updated_at = now;
-    let saved = save_frame(path, &frame, Some(memory.id), "agent:claim", None)?;
+    let saved = save_frame(path, &frame, Some(memory.id), "agent:claim", None, true)?;
     outln!(
         "{}",
         json!({
@@ -1095,6 +1130,7 @@ fn cmd_claim(path: &Path, args: &[String]) -> Result<()> {
 fn cmd_release(path: &Path, args: &[String]) -> Result<()> {
     let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
     let owner = arg_value(args, "--owner");
+    let _lock = crate::store::acquire_store_lock(path)?;
     let mut store = Store::open(path)?;
     let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
         .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
@@ -1107,7 +1143,7 @@ fn cmd_release(path: &Path, args: &[String]) -> Result<()> {
     frame.owner = None;
     frame.lease_until = None;
     frame.updated_at = now;
-    let saved = save_frame(path, &frame, Some(memory.id), "agent:release", None)?;
+    let saved = save_frame(path, &frame, Some(memory.id), "agent:release", None, true)?;
     outln!(
         "{}",
         json!({"ok": true, "id": saved.id, "task": frame.task, "released": true})
@@ -1120,9 +1156,11 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
     let summary = arg_value(args, "--summary");
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
+    let owner = arg_value(args, "--owner");
     let mut store = Store::open(path)?;
     let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
         .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
+    ensure_frame_owner(&frame, owner.as_deref(), "finish")?;
     frame.status = "done".to_string();
     frame.owner = None;
     frame.lease_until = None;
@@ -1133,7 +1171,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
             frame.notes.push(note);
         }
     }
-    let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None)?;
+    let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None, false)?;
 
     let summary_id = if let Some(summary) = summary.as_deref() {
         let input = AppendInput {
@@ -1864,7 +1902,7 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         arg_value(args, "--scope"),
         task,
         None,
-        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "authored".to_string())),
+        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
         arg_usize(args, "--max-items", 5),
         0.0,
         true,

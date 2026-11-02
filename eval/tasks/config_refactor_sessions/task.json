@@ -1,0 +1,24 @@
+{
+  "id": "config_refactor_sessions",
+  "goal": "Rename the legacy config key old_timeout to timeout across the package",
+  "next": [
+    "find all old_timeout references",
+    "rename the key and accessor",
+    "run the config tests"
+  ],
+  "constraints": [
+    "no compatibility alias for old_timeout"
+  ],
+  "touches": [
+    "src/config.py",
+    "src/app.py"
+  ],
+  "sessions": [
+    {
+      "prompt": "Session 1: inspect the config package and produce a short plan for renaming the legacy config key old_timeout to timeout. Do not edit files or tests."
+    },
+    {
+      "prompt": "Session 2: apply the rename to the config package, update every reference, and run the tests. Do not modify tests."
+    }
+  ]
+}
