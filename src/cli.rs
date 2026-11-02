@@ -1774,8 +1774,6 @@ fn run_audit(
             };
             let mut updated = memory.clone();
             updated.id = crate::model::new_id();
-            updated.created_at = now;
-            updated.valid_from = now;
             updated.source_hash = Some(hash);
             updated.source_line = (line > 0).then_some(line);
             updated.supersedes = vec![memory.id.clone()];
