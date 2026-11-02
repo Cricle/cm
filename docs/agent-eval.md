@@ -127,6 +127,22 @@ not write a memory for a one-shot task. Memory sources must be `path:symbol`
 pointers so the first read is the right file.
 
 
+## Pack/absorb smoke test
+
+`cm pack --task cm-help-preinject --budget 1200` produced a 4.8KB prompt. A
+subagent returned 3 strict JSONL records using only evidence IDs from the pack:
+
+| Metric | Value |
+|---|---:|
+| Subagent tokens | 46,565 |
+| Tool uses | 1 |
+| Wall time | 129.2s |
+| `absorb --dry-run` accepted | 3/3 |
+
+This validates the contract end to end; it is not yet a benefit claim. The next
+gate is comparing `pack → model → absorb` against direct `remember` on the same
+task.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
