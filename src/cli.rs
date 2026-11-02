@@ -484,7 +484,7 @@ fn print_usage() {
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
-         cm audit [--root <dir>] [--apply]
+         cm audit [--root <dir>] [--scope <scope>] [--limit <n>] [--apply]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -1200,7 +1200,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
         None
     };
 
-    let audit = run_audit(path, &root, apply)?;
+    let audit = run_audit(path, &root, apply, None, None)?;
     let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
     outln!(
         "{}",
@@ -1366,7 +1366,7 @@ fn run_govern(
             );
         }
     }
-    let conflicts = conflict_groups(memories.clone());
+    let conflicts = conflict_groups(&memories);
     let mut suggestions = Vec::new();
     for memory in &memories {
         if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
@@ -1510,41 +1510,87 @@ fn audit_source_issue(
 fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
+    let scope = arg_value(args, "--scope");
+    let limit = arg_value(args, "--limit").and_then(|value| value.parse::<usize>().ok());
     outln!(
         "{}",
-        serde_json::to_string(&run_audit(path, &root, apply)?)?
+        serde_json::to_string(&run_audit(path, &root, apply, scope.as_deref(), limit)?)?
     );
     Ok(())
 }
 
-fn run_audit(path: &Path, root: &Path, apply: bool) -> Result<serde_json::Value> {
+fn run_audit(
+    path: &Path,
+    root: &Path,
+    apply: bool,
+    scope: Option<&str>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value> {
     let mut store = Store::open(path)?;
-    let memories = active_memories(&mut store)?;
-    let now = crate::model::now_ms();
-    let mut checked = 0usize;
-    let mut issues = Vec::new();
-    for memory in &memories {
-        if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
-            continue;
-        }
-        let Some((relative, symbol)) = source_parts(&memory.source) else {
-            continue;
-        };
-        checked += 1;
-        let full = root.join(&relative);
-        let Some(issue) = audit_source_issue(memory, &full, symbol.as_deref()) else {
-            continue;
-        };
-        let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
-        issues.push(json!({
-            "id": memory.id,
-            "source": memory.source,
-            "path": full.display().to_string(),
-            "issue": issue,
-            "source_line": memory.source_line,
-            "age_days": age_days
-        }));
+    let mut memories = active_memories(&mut store)?;
+    if let Some(scope) = scope {
+        memories.retain(|memory| memory.scope == scope);
     }
+    if let Some(limit) = limit {
+        memories.truncate(limit);
+    }
+    let now = crate::model::now_ms();
+    let threads = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let chunk_size = memories.len().div_ceil(threads).max(1);
+    let parts: Vec<(usize, Vec<serde_json::Value>)> = if memories.is_empty() {
+        Vec::new()
+    } else {
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for chunk in memories.chunks(chunk_size) {
+                let root = root.to_path_buf();
+                handles.push(scope.spawn(move || {
+                    let mut checked = 0usize;
+                    let mut issues = Vec::new();
+                    for memory in chunk {
+                        if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
+                            continue;
+                        }
+                        let Some((relative, symbol)) = source_parts(&memory.source) else {
+                            continue;
+                        };
+                        checked += 1;
+                        let full = root.join(&relative);
+                        let Some(issue) = audit_source_issue(memory, &full, symbol.as_deref())
+                        else {
+                            continue;
+                        };
+                        let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
+                        issues.push(json!({
+                            "id": memory.id,
+                            "source": memory.source,
+                            "path": full.display().to_string(),
+                            "issue": issue,
+                            "source_line": memory.source_line,
+                            "age_days": age_days
+                        }));
+                    }
+                    (checked, issues)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("audit worker panicked"))
+                .collect()
+        })
+    };
+    let checked: usize = parts.iter().map(|(checked, _)| checked).sum();
+    let mut issues: Vec<serde_json::Value> =
+        parts.into_iter().flat_map(|(_, issues)| issues).collect();
+    issues.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .cmp(&b["id"].as_str())
+            .then_with(|| a["issue"].as_str().cmp(&b["issue"].as_str()))
+    });
     if apply {
         for issue in &issues {
             let Some(id) = issue["id"].as_str() else {
@@ -1562,7 +1608,9 @@ fn run_audit(path: &Path, root: &Path, apply: bool) -> Result<serde_json::Value>
         "checked": checked,
         "issues": issues,
         "issue_count": total,
-        "apply": apply
+        "apply": apply,
+        "scope": scope,
+        "limit": limit
     }))
 }
 
@@ -2155,7 +2203,7 @@ fn cmd_purge(path: &Path) -> Result<()> {
 fn cmd_conflicts(path: &Path) -> Result<()> {
     let mut store = Store::open(path)?;
     let memories = active_memories(&mut store)?;
-    let conflicts = conflict_groups(memories);
+    let conflicts = conflict_groups(&memories);
     outln!(
         "{}",
         serde_json::to_string(&json!({"ok": true, "conflicts": conflicts}))?
@@ -2168,24 +2216,14 @@ fn cmd_conflicts(path: &Path) -> Result<()> {
 /// Decodes each active doc once; never scans inactive docs.
 fn active_memories(store: &mut Store) -> Result<Vec<crate::model::Memory>> {
     let tail = store.tail_view()?;
-    let mut memories = Vec::new();
-    for idx in 0..store.doc_count() {
-        if !store.is_active(idx)? {
-            continue;
-        }
-        let meta = store.doc_meta(idx)?;
-        let memory = store.doc_memory(&meta)?;
-        if tail.hidden.contains(&memory.id) {
-            continue;
-        }
-        memories.push(memory);
-    }
+    let mut memories = store.active_memories_bulk()?;
+    memories.retain(|memory| !tail.hidden.contains(&memory.id));
     memories.extend(tail.memories);
     Ok(memories)
 }
 
-fn conflict_groups(memories: Vec<crate::model::Memory>) -> Vec<ConflictGroupOut> {
-    let mut groups: HashMap<(String, String, String), Vec<crate::model::Memory>> = HashMap::new();
+fn conflict_groups(memories: &[crate::model::Memory]) -> Vec<ConflictGroupOut> {
+    let mut groups: HashMap<(String, String, String), Vec<&crate::model::Memory>> = HashMap::new();
     for memory in memories {
         if memory.kind == FRAME_KIND || memory.kind == FEEDBACK_KIND {
             continue;
@@ -2210,7 +2248,10 @@ fn conflict_groups(memories: Vec<crate::model::Memory>) -> Vec<ConflictGroupOut>
                 scope,
                 kind,
                 subject,
-                records: records.iter().map(MemoryOut::from).collect(),
+                records: records
+                    .iter()
+                    .map(|record| MemoryOut::from(*record))
+                    .collect(),
             });
         }
     }
@@ -2288,7 +2329,7 @@ pub(crate) fn cmd_doctor(path: &Path) -> Result<bool> {
                     ));
                 }
 
-                let groups = conflict_groups(memories);
+                let groups = conflict_groups(&memories);
                 conflicts = groups.len();
                 append_conflict_warnings(&mut warnings, &groups);
             }

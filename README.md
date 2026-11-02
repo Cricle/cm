@@ -107,8 +107,9 @@ supersede the previous frame. `feedback` records useful/stale/wrong signals;
 duplicates with `--apply`, and folds near-duplicates when `--merge` is set.
 `audit --root <repo>` checks that each `path:symbol` source still exists, that
 the symbol is present, and that the source excerpt hash captured at write time
-still matches. `--apply` records stale feedback for `missing_source`,
-`missing_symbol`, or `source_changed` drift, which `govern` then surfaces.
+still matches. `--scope` and `--limit` bound large-store audits; `--apply`
+records stale feedback for `missing_source`, `missing_symbol`, or
+`source_changed` drift, which `govern` then surfaces.
 Source paths are part of the BM25 token stream, so file/symbol queries work
 without embeddings. Read commands may create or update the disposable
 `cm.cache` cache; `cm` remains unchanged.
@@ -134,7 +135,7 @@ cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
-cm audit --root <repo> [--apply] [--file cm]
+cm audit --root <repo> [--scope <scope>] [--limit <n>] [--apply] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
@@ -270,6 +271,11 @@ cache replacement can be slower while the OS reloads the store.
 dirty index page plus the page table per changeset. A full `reindex` of the
 same 1M store is roughly 10-20s. Numbers are workload-dependent; use `cm verify`
 after bulk changes.
+
+Maintenance on the 1M synthetic store after the bulk active-document scan:
+`audit` ~10s (one million source-path checks), `govern` ~12s, `conflicts` ~16s.
+These are maintenance operations, not query paths; hot searches remain
+sub-100ms. Full-store audit still scales with the number of cited sources.
 
 Working-set checks:
 

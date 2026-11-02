@@ -768,6 +768,40 @@ impl Store {
         self.header.doc_count as u32
     }
 
+    /// Load all active documents in one pass: batch index metadata reads and
+    /// decompress each data block once. This is for maintenance commands
+    /// (`audit`, `govern`, `conflicts`, `doctor`), not for hot queries.
+    pub(crate) fn active_memories_bulk(&self) -> Result<Vec<Memory>> {
+        let active = self.active_bits()?;
+        let mut indices = Vec::new();
+        for idx in 0..self.doc_count() {
+            if active[idx as usize / 8] & (1 << (idx % 8)) != 0 {
+                indices.push(idx);
+            }
+        }
+        let metas = self.index.doc_meta_batch(&indices)?;
+        let mut by_block: HashMap<u32, Vec<(u32, DocMeta)>> = HashMap::new();
+        for (&idx, meta) in indices.iter().zip(metas) {
+            by_block.entry(meta.block_id).or_default().push((idx, meta));
+        }
+        let mut memories = Vec::with_capacity(indices.len());
+        for (block_id, items) in by_block {
+            let block = decompress_block(&self.mmap[..], &self.header, block_id)?;
+            for (idx, meta) in items {
+                let start = meta.offset_in_block as usize;
+                let end = start
+                    .checked_add(meta.record_len as usize)
+                    .ok_or_else(|| anyhow!("doc record offset overflow"))?;
+                let raw = block
+                    .get(start..end)
+                    .ok_or_else(|| anyhow!("doc record out of block"))?;
+                memories.push((idx, parse_memory_record(raw)?));
+            }
+        }
+        memories.sort_by_key(|(idx, _)| *idx);
+        Ok(memories.into_iter().map(|(_, memory)| memory).collect())
+    }
+
     pub(crate) fn find_doc(&mut self, id: &str) -> Result<Option<(u32, Memory)>> {
         let (hash_cap, hash_off) = {
             let ib = self.index();
