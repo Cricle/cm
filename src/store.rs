@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
@@ -23,6 +25,8 @@ const PAGE_SIZE: usize = 64 * 1024;
 const PAGE_MAGIC: &[u8; 8] = b"CMPG1\0\0\0";
 const PAGE_ENTRY: usize = 24;
 const PAGE_TABLE_HEADER: usize = 24;
+const INDEX_PAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const INDEX_PAGE_CACHE_PAGES: usize = INDEX_PAGE_CACHE_BYTES / PAGE_SIZE;
 const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
 const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
@@ -78,9 +82,10 @@ impl Record {
 }
 
 pub(crate) struct Store {
-    pub mmap: Mmap,
+    pub mmap: Arc<Mmap>,
     pub header: Header,
     pub cache: Cache,
+    index: Index,
 }
 
 pub(crate) struct TailView {
@@ -108,6 +113,495 @@ struct PageEntry {
     comp_len: u32,
     raw_len: u32,
     hash: u64,
+}
+
+struct CachedPage {
+    data: Arc<[u8]>,
+    last_used: u64,
+}
+
+/// A small strict-LRU cache for decompressed index pages. The cap is a byte
+/// budget (32 MiB by default) and also a page-count bound so a malformed page
+/// table cannot grow the cache without limit.
+struct PageCache {
+    pages: HashMap<usize, CachedPage>,
+    bytes: usize,
+    tick: u64,
+}
+
+impl PageCache {
+    fn new() -> Self {
+        Self {
+            pages: HashMap::new(),
+            bytes: 0,
+            tick: 0,
+        }
+    }
+
+    fn get(&mut self, page_id: usize) -> Option<Arc<[u8]>> {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        let entry = self.pages.get_mut(&page_id)?;
+        entry.last_used = tick;
+        Some(Arc::clone(&entry.data))
+    }
+
+    fn insert(&mut self, page_id: usize, data: Arc<[u8]>) {
+        if self.pages.contains_key(&page_id) {
+            return;
+        }
+        while !self.pages.is_empty()
+            && (self.pages.len() >= INDEX_PAGE_CACHE_PAGES
+                || self.bytes.saturating_add(data.len()) > INDEX_PAGE_CACHE_BYTES)
+        {
+            let victim = self
+                .pages
+                .iter()
+                .min_by_key(|(_, page)| page.last_used)
+                .map(|(id, _)| *id);
+            let Some(victim) = victim else {
+                break;
+            };
+            if let Some(page) = self.pages.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(page.data.len());
+            }
+        }
+        self.tick = self.tick.wrapping_add(1);
+        self.bytes = self.bytes.saturating_add(data.len());
+        self.pages.insert(
+            page_id,
+            CachedPage {
+                data,
+                last_used: self.tick,
+            },
+        );
+    }
+}
+
+struct PagedIndex {
+    mmap: Arc<Mmap>,
+    entries: Arc<Vec<PageEntry>>,
+    cache: RefCell<PageCache>,
+    decompressor: RefCell<zstd::bulk::Decompressor<'static>>,
+    len: usize,
+    hash: u64,
+}
+
+fn decompress_index_page(
+    data: &[u8],
+    page_id: usize,
+    entry: PageEntry,
+    decompressor: &mut zstd::bulk::Decompressor<'static>,
+) -> Result<Vec<u8>> {
+    let start = entry.offset as usize;
+    let end = start
+        .checked_add(entry.comp_len as usize)
+        .context("index page offset overflow")?;
+    let compressed = data
+        .get(start..end)
+        .ok_or_else(|| anyhow!("index page {page_id} out of bounds"))?;
+    let raw = decompressor
+        .decompress(compressed, entry.raw_len as usize)
+        .context("decompress index page")?;
+    if raw.len() != entry.raw_len as usize || xxh3_64(&raw) != entry.hash {
+        bail!("index page checksum mismatch");
+    }
+    Ok(raw)
+}
+
+impl PagedIndex {
+    fn load(&self, page_id: usize) -> Result<Arc<[u8]>> {
+        if let Some(page) = self.cache.borrow_mut().get(page_id) {
+            return Ok(page);
+        }
+        let entry = *self
+            .entries
+            .get(page_id)
+            .ok_or_else(|| anyhow!("index page {page_id} out of range"))?;
+        let raw = decompress_index_page(
+            &self.mmap,
+            page_id,
+            entry,
+            &mut self.decompressor.borrow_mut(),
+        )?;
+        let page: Arc<[u8]> = Arc::from(raw.into_boxed_slice());
+        self.cache.borrow_mut().insert(page_id, Arc::clone(&page));
+        Ok(page)
+    }
+
+    /// Read document metadata for many random doc ids. Pages are decompressed
+    /// once into a reusable buffer and discarded; only the small `DocMeta`
+    /// records are kept. This avoids allocating and caching dozens of MiB of
+    /// whole 64 KiB pages for a single query.
+    fn doc_meta_batch(&self, docs_off: usize, indices: &[u32]) -> Result<Vec<DocMeta>> {
+        let mut groups: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        for (result_idx, &idx) in indices.iter().enumerate() {
+            let offset = docs_off + idx as usize * DOC_SIZE;
+            groups
+                .entry(offset / PAGE_SIZE)
+                .or_default()
+                .push((result_idx, offset % PAGE_SIZE));
+        }
+        let mut groups: Vec<(usize, Vec<(usize, usize)>)> = groups.into_iter().collect();
+        groups.sort_by_key(|(page_id, _)| *page_id);
+        let mut metas = vec![
+            DocMeta {
+                block_id: 0,
+                offset_in_block: 0,
+                record_len: 0,
+                token_count: 0,
+                scope_id: 0,
+                kind: 0,
+            };
+            indices.len()
+        ];
+        let threads = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1)
+            .clamp(1, 16);
+        if threads > 1 && groups.len() > 2 {
+            let chunk = groups.len().div_ceil(threads);
+            let mmap = Arc::clone(&self.mmap);
+            let entries = Arc::clone(&self.entries);
+            let decoded: Vec<(usize, DocMeta)> = std::thread::scope(|scope| -> Result<_> {
+                let mut handles = Vec::new();
+                for part in groups.chunks(chunk) {
+                    let mmap = Arc::clone(&mmap);
+                    let entries = Arc::clone(&entries);
+                    handles.push(scope.spawn(move || -> Result<Vec<(usize, DocMeta)>> {
+                        let mut decompressor = zstd::bulk::Decompressor::new()?;
+                        let mut buffer = vec![0u8; PAGE_SIZE];
+                        let mut out = Vec::new();
+                        for (page_id, items) in part {
+                            read_doc_meta_page(
+                                &mmap,
+                                &entries,
+                                *page_id,
+                                items,
+                                &mut decompressor,
+                                &mut buffer,
+                                &mut out,
+                            )?;
+                        }
+                        Ok(out)
+                    }));
+                }
+                let mut decoded = Vec::new();
+                for handle in handles {
+                    let part = handle
+                        .join()
+                        .map_err(|_| anyhow!("index page worker panicked"))??;
+                    decoded.extend(part);
+                }
+                Ok(decoded)
+            })?;
+            for (result_idx, meta) in decoded {
+                metas[result_idx] = meta;
+            }
+        } else {
+            let mut decompressor = zstd::bulk::Decompressor::new()?;
+            let mut buffer = vec![0u8; PAGE_SIZE];
+            let mut out = Vec::new();
+            for (page_id, items) in &groups {
+                read_doc_meta_page(
+                    &self.mmap,
+                    &self.entries,
+                    *page_id,
+                    items,
+                    &mut decompressor,
+                    &mut buffer,
+                    &mut out,
+                )?;
+            }
+            for (result_idx, meta) in out {
+                metas[result_idx] = meta;
+            }
+        }
+        Ok(metas)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_doc_meta_page(
+    data: &[u8],
+    entries: &[PageEntry],
+    page_id: usize,
+    items: &[(usize, usize)],
+    decompressor: &mut zstd::bulk::Decompressor<'static>,
+    buffer: &mut [u8],
+    out: &mut Vec<(usize, DocMeta)>,
+) -> Result<()> {
+    let entry = *entries
+        .get(page_id)
+        .ok_or_else(|| anyhow!("index page {page_id} out of range"))?;
+    let start = entry.offset as usize;
+    let end = start
+        .checked_add(entry.comp_len as usize)
+        .context("index page offset overflow")?;
+    let compressed = data
+        .get(start..end)
+        .ok_or_else(|| anyhow!("index page {page_id} out of bounds"))?;
+    let written = decompressor
+        .decompress_to_buffer(compressed, &mut buffer[..])
+        .context("decompress index page")?;
+    if written != entry.raw_len as usize || xxh3_64(&buffer[..written]) != entry.hash {
+        bail!("index page checksum mismatch");
+    }
+    for &(result_idx, in_page) in items {
+        let end = in_page
+            .checked_add(DOC_SIZE)
+            .ok_or_else(|| anyhow!("doc metadata offset overflow"))?;
+        if end > written {
+            bail!("doc metadata crosses index page boundary");
+        }
+        out.push((result_idx, parse_doc_meta(&buffer[in_page..end])));
+    }
+    Ok(())
+}
+
+enum IndexStorage {
+    /// Legacy single-blob index, already decompressed into memory.
+    Blob(Vec<u8>),
+    /// Page-index: only the page table is loaded up front.
+    Paged(PagedIndex),
+}
+
+/// Read-only view of the logical (uncompressed) index. Callers use
+/// `read_u32`/`read_u64`/`read_bytes` and stay independent of whether the
+/// store uses a page index or the legacy compressed single blob.
+pub(crate) struct Index {
+    data: IndexStorage,
+}
+
+impl Index {
+    fn from_blob(raw: Vec<u8>) -> Self {
+        Self {
+            data: IndexStorage::Blob(raw),
+        }
+    }
+
+    fn from_pages(mmap: Arc<Mmap>, header: &Header) -> Result<Self> {
+        let start = header.index_off as usize;
+        let end = start
+            .checked_add(header.index_len as usize)
+            .context("page table offset overflow")?;
+        let table = mmap
+            .get(start..end)
+            .ok_or_else(|| anyhow!("page table out of bounds"))?;
+        let entries = parse_page_table(table, header)?;
+        let len = header.index_raw_len as usize;
+        if entries.len() != len.div_ceil(PAGE_SIZE) {
+            bail!("page index has wrong page count");
+        }
+        Ok(Self {
+            data: IndexStorage::Paged(PagedIndex {
+                mmap,
+                entries: Arc::new(entries),
+                cache: RefCell::new(PageCache::new()),
+                decompressor: RefCell::new(zstd::bulk::Decompressor::new()?),
+                len,
+                hash: header.index_hash,
+            }),
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match &self.data {
+            IndexStorage::Blob(raw) => raw.len(),
+            IndexStorage::Paged(paged) => paged.len,
+        }
+    }
+
+    fn page(&self, page_id: usize) -> Result<Arc<[u8]>> {
+        match &self.data {
+            IndexStorage::Blob(_) => bail!("page access on single-blob index"),
+            IndexStorage::Paged(paged) => paged.load(page_id),
+        }
+    }
+
+    fn check_range(&self, offset: usize, len: usize) -> Result<usize> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("index range overflow"))?;
+        if end > self.len() {
+            bail!("index range {offset}..{end} out of bounds");
+        }
+        Ok(end)
+    }
+
+    fn read_array<const N: usize>(&self, offset: usize) -> Result<[u8; N]> {
+        let end = self.check_range(offset, N)?;
+        match &self.data {
+            IndexStorage::Blob(raw) => {
+                let mut out = [0u8; N];
+                out.copy_from_slice(&raw[offset..end]);
+                Ok(out)
+            }
+            IndexStorage::Paged(paged) => {
+                let page_id = offset / PAGE_SIZE;
+                let in_page = offset % PAGE_SIZE;
+                let page = paged.load(page_id)?;
+                if in_page + N <= page.len() {
+                    let mut out = [0u8; N];
+                    out.copy_from_slice(&page[in_page..in_page + N]);
+                    Ok(out)
+                } else {
+                    let bytes = self.read_bytes(offset, N)?;
+                    let mut out = [0u8; N];
+                    out.copy_from_slice(&bytes);
+                    Ok(out)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn read_u8(&self, offset: usize) -> Result<u8> {
+        Ok(self.read_array::<1>(offset)?[0])
+    }
+
+    pub(crate) fn read_u16(&self, offset: usize) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.read_array::<2>(offset)?))
+    }
+
+    pub(crate) fn read_u32(&self, offset: usize) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.read_array::<4>(offset)?))
+    }
+
+    pub(crate) fn read_u64(&self, offset: usize) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.read_array::<8>(offset)?))
+    }
+
+    pub(crate) fn read_f64(&self, offset: usize) -> Result<f64> {
+        Ok(f64::from_le_bytes(self.read_array::<8>(offset)?))
+    }
+
+    pub(crate) fn read_bytes(&self, offset: usize, len: usize) -> Result<Vec<u8>> {
+        let end = self.check_range(offset, len)?;
+        match &self.data {
+            IndexStorage::Blob(raw) => Ok(raw[offset..end].to_vec()),
+            IndexStorage::Paged(paged) => {
+                let mut out = Vec::with_capacity(len);
+                let mut pos = offset;
+                while pos < end {
+                    let page_id = pos / PAGE_SIZE;
+                    let page = paged.load(page_id)?;
+                    let in_page = pos % PAGE_SIZE;
+                    if in_page >= page.len() {
+                        bail!("index page {page_id} too short");
+                    }
+                    let take = (end - pos).min(page.len() - in_page);
+                    out.extend_from_slice(&page[in_page..in_page + take]);
+                    pos += take;
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    /// Materialize the whole logical index. Only checkpoint/reindex paths use
+    /// this; normal reads never copy the full index.
+    pub(crate) fn to_vec(&self) -> Result<Vec<u8>> {
+        match &self.data {
+            IndexStorage::Blob(raw) => Ok(raw.clone()),
+            IndexStorage::Paged(paged) => {
+                let raw = self.read_bytes(0, paged.len)?;
+                if xxh3_64(&raw) != paged.hash {
+                    bail!("index hash mismatch");
+                }
+                Ok(raw)
+            }
+        }
+    }
+
+    pub(crate) fn cursor(&self, offset: usize) -> IndexCursor<'_> {
+        IndexCursor::new(self, offset)
+    }
+
+    fn is_paged(&self) -> bool {
+        matches!(self.data, IndexStorage::Paged(_))
+    }
+
+    pub(crate) fn doc_meta_batch(&self, indices: &[u32]) -> Result<Vec<DocMeta>> {
+        let docs_off = self.read_u64(24)? as usize;
+        match &self.data {
+            IndexStorage::Blob(raw) => indices
+                .iter()
+                .map(|&idx| {
+                    let offset = docs_off + idx as usize * DOC_SIZE;
+                    let end = self.check_range(offset, DOC_SIZE)?;
+                    Ok(parse_doc_meta(&raw[offset..end]))
+                })
+                .collect(),
+            IndexStorage::Paged(paged) => {
+                for &idx in indices {
+                    let offset = docs_off + idx as usize * DOC_SIZE;
+                    self.check_range(offset, DOC_SIZE)?;
+                }
+                paged.doc_meta_batch(docs_off, indices)
+            }
+        }
+    }
+}
+
+pub(crate) struct IndexCursor<'a> {
+    index: &'a Index,
+    offset: usize,
+    page_id: usize,
+    page: Option<Arc<[u8]>>,
+    page_end: usize,
+}
+
+impl<'a> IndexCursor<'a> {
+    fn new(index: &'a Index, offset: usize) -> Self {
+        Self {
+            index,
+            offset,
+            page_id: usize::MAX,
+            page: None,
+            page_end: 0,
+        }
+    }
+
+    pub(crate) fn byte(&mut self) -> Result<u8> {
+        if self.offset >= self.index.len() {
+            bail!("index cursor out of bounds");
+        }
+        if let IndexStorage::Blob(raw) = &self.index.data {
+            let byte = raw[self.offset];
+            self.offset += 1;
+            return Ok(byte);
+        }
+        if self.page.is_none() || self.offset >= self.page_end {
+            let page_id = self.offset / PAGE_SIZE;
+            let page = self.index.page(page_id)?;
+            self.page_id = page_id;
+            self.page_end = (page_id + 1) * PAGE_SIZE;
+            self.page = Some(page);
+        }
+        let page = self.page.as_ref().expect("page loaded");
+        let in_page = self.offset - self.page_id * PAGE_SIZE;
+        let byte = *page
+            .get(in_page)
+            .ok_or_else(|| anyhow!("index cursor beyond page"))?;
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    pub(crate) fn varint(&mut self) -> Result<usize> {
+        let mut value = 0usize;
+        let mut shift = 0u32;
+        loop {
+            let byte = self.byte()?;
+            value |= ((byte & 0x7F) as usize) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+            if shift >= usize::BITS {
+                bail!("posting varint overflow");
+            }
+        }
+    }
 }
 
 fn build_page_chunks(raw: &[u8]) -> Result<Vec<PageChunk>> {
@@ -265,57 +759,54 @@ fn page_layout(
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        let header = read_current_header(&mmap)?;
+        let mmap = Arc::new(unsafe { Mmap::map(&file)? });
+        let header = read_current_header(&mmap[..])?;
         if header.index_len == 0 {
             bail!("no index; run cm reindex");
         }
-        let cache =
-            match Cache::open_existing(path, header.index_hash, header.index_raw_len as usize) {
-                Some(cache) => cache,
-                None => {
-                    let index_raw = read_index_raw(&mmap, &header)?;
-                    match Cache::create(path, header.index_hash, &index_raw) {
-                        Ok(cache) => cache,
-                        // The cache is disposable: a read must still work when
-                        // a concurrent writer replaces it or the directory is
-                        // read-only. Retry the open once, then fall back to an
-                        // in-process cache.
-                        Err(_) => match Cache::open_existing(
-                            path,
-                            header.index_hash,
-                            header.index_raw_len as usize,
-                        ) {
-                            Some(cache) => cache,
-                            None => Cache::memory(header.index_hash, &index_raw)?,
-                        },
-                    }
-                }
-            };
+        // Page-index stores load only the page table here. The legacy
+        // single-blob path decompresses the index once, as before.
+        let index = if header.flags & HEADER_FLAG_PAGE_INDEX != 0 {
+            Index::from_pages(Arc::clone(&mmap), &header)?
+        } else {
+            Index::from_blob(read_index_raw(&mmap[..], &header)?)
+        };
+        let cache = match Cache::open_existing(path, header.index_hash) {
+            Some(cache) => cache,
+            None => match Cache::create(path, header.index_hash) {
+                Ok(cache) => cache,
+                // The cache is disposable: a read must still work when a
+                // concurrent writer replaces it or the directory is
+                // read-only. Retry the open once, then fall back to an
+                // in-process cache.
+                Err(_) => match Cache::open_existing(path, header.index_hash) {
+                    Some(cache) => cache,
+                    None => Cache::memory(header.index_hash)?,
+                },
+            },
+        };
         Ok(Self {
             mmap,
             header,
             cache,
+            index,
         })
     }
 
-    pub(crate) fn index(&self) -> &[u8] {
-        self.cache.index()
+    pub(crate) fn index(&self) -> &Index {
+        &self.index
     }
 
     pub(crate) fn doc_meta(&self, idx: u32) -> Result<DocMeta> {
         let ib = self.index();
-        let docs_off = read_u64(ib, 24) as usize;
+        let docs_off = ib.read_u64(24)? as usize;
         let offset = docs_off + idx as usize * DOC_SIZE;
-        Ok(DocMeta {
-            block_id: read_u32(ib, offset),
-            offset_in_block: read_u32(ib, offset + 4),
-            record_len: read_u32(ib, offset + 8),
-        })
+        let raw = ib.read_array::<DOC_SIZE>(offset)?;
+        Ok(parse_doc_meta(&raw))
     }
 
     pub(crate) fn doc_memory(&mut self, meta: &DocMeta) -> Result<Memory> {
-        let data: &[u8] = &self.mmap;
+        let data: &[u8] = &self.mmap[..];
         let header = self.header;
         let cache = &mut self.cache;
         let block = cache.get_block(meta.block_id, || {
@@ -331,31 +822,35 @@ impl Store {
 
     pub(crate) fn is_active(&self, idx: u32) -> Result<bool> {
         let ib = self.index();
-        let active_off = read_u64(ib, 48) as usize;
-        Ok(ib[active_off + idx as usize / 8] & (1 << (idx % 8)) != 0)
+        let active_off = ib.read_u64(48)? as usize;
+        Ok(ib.read_u8(active_off + idx as usize / 8)? & (1 << (idx % 8)) != 0)
     }
 
-    pub(crate) fn active_count(&self) -> u64 {
+    pub(crate) fn active_bits(&self) -> Result<Vec<u8>> {
         let ib = self.index();
-        let active_off = read_u64(ib, 48) as usize;
+        let active_off = ib.read_u64(48)? as usize;
         let active_len = (self.doc_count() as usize).div_ceil(8);
-        ib[active_off..active_off + active_len]
+        ib.read_bytes(active_off, active_len)
+    }
+
+    pub(crate) fn active_count(&self) -> Result<u64> {
+        Ok(self
+            .active_bits()?
             .iter()
             .map(|byte| byte.count_ones() as u64)
-            .sum()
+            .sum())
     }
 
     pub(crate) fn doc_count(&self) -> u32 {
-        let ib = self.index();
-        read_u32(ib, 8)
+        self.header.doc_count as u32
     }
 
     pub(crate) fn find_doc(&mut self, id: &str) -> Result<Option<(u32, Memory)>> {
-        let (hash_cap, hash_off) = {
+        let (hash_cap, hash_off, version) = {
             let ib = self.index();
-            (read_u32(ib, 20), read_u64(ib, 32) as usize)
+            (ib.read_u32(20)?, ib.read_u64(32)? as usize, ib.read_u8(4)?)
         };
-        let hash8 = self.index()[4] >= INDEX_VERSION_HASH8;
+        let hash8 = version >= INDEX_VERSION_HASH8;
         let hash = xxh3_64(id.as_bytes());
         let hash_slot = if hash8 { HASH_SLOT8 } else { HASH_SLOT };
         let mut slot = (hash as usize) & (hash_cap as usize - 1);
@@ -364,9 +859,9 @@ impl Store {
                 let ib = self.index();
                 let offset = hash_off + slot * hash_slot;
                 if hash8 {
-                    (read_u32(ib, offset) as u64, read_u32(ib, offset + 4))
+                    (ib.read_u32(offset)? as u64, ib.read_u32(offset + 4)?)
                 } else {
-                    (read_u64(ib, offset), read_u32(ib, offset + 8))
+                    (ib.read_u64(offset)?, ib.read_u32(offset + 8)?)
                 }
             };
             if doc_idx == u32::MAX {
@@ -391,45 +886,56 @@ impl Store {
         Ok(None)
     }
 
-    pub(crate) fn scope_id(&self, scope: &str) -> Option<u32> {
+    pub(crate) fn scope_id(&self, scope: &str) -> Result<Option<u32>> {
         let ib = self.index();
-        let mut offset = read_u64(ib, 56) as usize;
-        let count = read_u32(ib, offset) as usize;
+        let mut offset = ib.read_u64(56)? as usize;
+        let count = ib.read_u32(offset)? as usize;
         offset += 4;
         for id in 0..count {
-            let len = read_u32(ib, offset) as usize;
+            let len = ib.read_u32(offset)? as usize;
             offset += 4;
-            if &ib[offset..offset + len] == scope.as_bytes() {
-                return Some(id as u32);
+            if ib.read_bytes(offset, len)? == scope.as_bytes() {
+                return Ok(Some(id as u32));
             }
             offset += len;
         }
-        None
+        Ok(None)
     }
 
-    fn token_lookup(&self, token: &str) -> Option<(u32, u32)> {
+    /// Returns `(posting_start, posting_count, posting_end)` where start/end
+    /// are byte offsets into the postings region. The end offset comes from
+    /// the next token entry, so callers can read an exact slice.
+    fn token_lookup(&self, token: &str) -> Result<Option<(u32, u32, u32)>> {
         let ib = self.index();
-        let token_count = read_u32(ib, 16) as usize;
-        let offsets_off = read_u64(ib, 64) as usize;
-        let tokens_off = read_u64(ib, 72) as usize;
+        let token_count = ib.read_u32(16)? as usize;
+        let offsets_off = ib.read_u64(64)? as usize;
+        let tokens_off = ib.read_u64(72)? as usize;
+        let postings_len = ib.read_u64(88)? as u32;
         let hash = xxh3_64(token.as_bytes());
         let mut low = 0usize;
         let mut high = token_count;
         while low < high {
             let mid = (low + high) / 2;
-            let rel = read_u64(ib, offsets_off + mid * 8) as usize;
+            let rel = ib.read_u64(offsets_off + mid * 8)? as usize;
             let offset = tokens_off + rel;
-            let entry_hash = read_u64(ib, offset);
-            let len = u16::from_le_bytes(ib[offset + 8..offset + 10].try_into().unwrap()) as usize;
-            let entry_token = &ib[offset + 10..offset + 10 + len];
+            let entry_hash = ib.read_u64(offset)?;
+            let len = ib.read_u16(offset + 8)? as usize;
+            let entry_token = ib.read_bytes(offset + 10, len)?;
             let cmp = entry_hash
                 .cmp(&hash)
-                .then_with(|| entry_token.cmp(token.as_bytes()));
+                .then_with(|| entry_token.as_slice().cmp(token.as_bytes()));
             if cmp == std::cmp::Ordering::Equal {
-                return Some((
-                    read_u32(ib, offset + 10 + len),
-                    read_u32(ib, offset + 14 + len),
-                ));
+                let start = ib.read_u32(offset + 10 + len)?;
+                let count = ib.read_u32(offset + 14 + len)?;
+                let end = if mid + 1 < token_count {
+                    let next_rel = ib.read_u64(offsets_off + (mid + 1) * 8)? as usize;
+                    let next_offset = tokens_off + next_rel;
+                    let next_len = ib.read_u16(next_offset + 8)? as usize;
+                    ib.read_u32(next_offset + 10 + next_len)?
+                } else {
+                    postings_len
+                };
+                return Ok(Some((start, count, end)));
             }
             if cmp == std::cmp::Ordering::Less {
                 low = mid + 1;
@@ -437,30 +943,52 @@ impl Store {
                 high = mid;
             }
         }
-        None
+        Ok(None)
     }
 
-    fn decode_postings(&self, start: u32, count: u32) -> Result<Vec<(u32, u32)>> {
+    fn decode_postings(&self, start: u32, count: u32, end: u32) -> Result<Vec<(u32, u32)>> {
         let ib = self.index();
-        let postings_off = read_u64(ib, 80) as usize;
+        let postings_off = ib.read_u64(80)? as usize;
         let mut postings = Vec::with_capacity(count as usize);
-        if ib[4] >= INDEX_VERSION_DELTA {
-            let mut cursor = postings_off + start as usize;
-            let mut previous = 0u32;
-            for _ in 0..count {
-                let delta = take_varint(ib, &mut cursor)? as u32;
-                let doc_idx = previous
-                    .checked_add(delta)
-                    .context("posting delta overflow")?;
-                let tf = take_varint(ib, &mut cursor)? as u32;
-                postings.push((doc_idx, tf));
-                previous = doc_idx;
+        if count == 0 {
+            return Ok(postings);
+        }
+        if ib.read_u8(4)? >= INDEX_VERSION_DELTA {
+            if ib.is_paged() {
+                // The varint cursor is convenient for the single-blob path,
+                // but per-byte page checks are expensive. For page indexes
+                // read the exact posting extent and decode it as a slice.
+                let begin = postings_off + start as usize;
+                let len = end.saturating_sub(start) as usize;
+                let bytes = ib.read_bytes(begin, len)?;
+                let mut cursor = 0usize;
+                let mut previous = 0u32;
+                for _ in 0..count {
+                    let delta = take_varint_slice(&bytes, &mut cursor)? as u32;
+                    let doc_idx = previous
+                        .checked_add(delta)
+                        .context("posting delta overflow")?;
+                    let tf = take_varint_slice(&bytes, &mut cursor)? as u32;
+                    postings.push((doc_idx, tf));
+                    previous = doc_idx;
+                }
+            } else {
+                let mut cursor = ib.cursor(postings_off + start as usize);
+                let mut previous = 0u32;
+                for _ in 0..count {
+                    let delta = cursor.varint()? as u32;
+                    let doc_idx = previous
+                        .checked_add(delta)
+                        .context("posting delta overflow")?;
+                    let tf = cursor.varint()? as u32;
+                    postings.push((doc_idx, tf));
+                    previous = doc_idx;
+                }
             }
         } else {
-            let stride = posting_stride(ib);
             for i in 0..count {
-                let offset = postings_off + (start as usize + i as usize) * stride;
-                postings.push((read_u32(ib, offset), read_posting_tf(ib, offset, stride)));
+                let offset = postings_off + (start as usize + i as usize) * POSTING_STRIDE;
+                postings.push((ib.read_u32(offset)?, read_posting_tf_index(ib, offset)?));
             }
         }
         Ok(postings)
@@ -476,34 +1004,34 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(u32, f64)>> {
         let ib = self.index();
-        let doc_count = read_u32(ib, 8) as f64;
-        let avgdl = read_f64(ib, 96);
+        let doc_count = self.doc_count() as f64;
+        let avgdl = ib.read_f64(96)?;
         let mut scores = vec![0.0f64; doc_count as usize];
         let mut touched = Vec::new();
-        let docs_off = read_u64(ib, 24) as usize;
-        let active_off = read_u64(ib, 48) as usize;
+        let docs_off = ib.read_u64(24)? as usize;
+        let active = self.active_bits()?;
         for term in terms {
-            let Some((start, count)) = self.token_lookup(term) else {
+            let Some((start, count, end)) = self.token_lookup(term)? else {
                 continue;
             };
             let df = count as f64;
             let idf = (1.0 + (doc_count - df + 0.5) / (df + 0.5)).ln();
-            for (doc_idx, tf) in self.decode_postings(start, count)? {
+            for (doc_idx, tf) in self.decode_postings(start, count, end)? {
                 if exclude == Some(doc_idx)
                     || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
-                    || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
+                    || active[doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
                 {
                     continue;
                 }
                 let meta_offset = docs_off + doc_idx as usize * DOC_SIZE;
-                let scope = read_u32(ib, meta_offset + 16);
-                let kind_value = ib[meta_offset + 28];
+                let scope = ib.read_u32(meta_offset + 16)?;
+                let kind_value = ib.read_u8(meta_offset + 28)?;
                 if scope_id.is_some_and(|value| scope != value)
                     || kind.is_some_and(|value| kind_value != value)
                 {
                     continue;
                 }
-                let token_count = read_u32(ib, docs_off + doc_idx as usize * DOC_SIZE + 12) as f64;
+                let token_count = ib.read_u32(meta_offset + 12)? as f64;
                 let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
                 let tf = tf as f64;
                 let score = idf * (tf * 2.2) / (tf + norm);
@@ -536,8 +1064,8 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(u32, f64)>> {
         let ib = self.index();
-        let doc_count = read_u32(ib, 8) as f64;
-        let avgdl = read_f64(ib, 96);
+        let doc_count = self.doc_count() as f64;
+        let avgdl = ib.read_f64(96)?;
         let mut seen = HashSet::new();
         let terms: Vec<String> = tokenize(query)
             .into_iter()
@@ -546,7 +1074,7 @@ impl Store {
             .collect();
         let mut term_info = Vec::new();
         for term in &terms {
-            if let Some((start, count)) = self.token_lookup(term) {
+            if let Some((start, count, end)) = self.token_lookup(term)? {
                 let high_df_cutoff = if doc_count >= 10_000.0 {
                     doc_count / 10.0
                 } else {
@@ -554,15 +1082,15 @@ impl Store {
                 };
                 if count as f64 <= high_df_cutoff {
                     let idf = (1.0 + (doc_count - count as f64 + 0.5) / (count as f64 + 0.5)).ln();
-                    term_info.push((start, count, idf));
+                    term_info.push((start, count, end, idf));
                 }
             }
         }
         if term_info.is_empty() {
             for term in &terms {
-                if let Some((start, count)) = self.token_lookup(term) {
+                if let Some((start, count, end)) = self.token_lookup(term)? {
                     let idf = (1.0 + (doc_count - count as f64 + 0.5) / (count as f64 + 0.5)).ln();
-                    term_info.push((start, count, idf));
+                    term_info.push((start, count, end, idf));
                 }
             }
         }
@@ -572,44 +1100,45 @@ impl Store {
         if self.doc_count() <= 10_000 {
             return self.bm25_all_terms(&terms, scope_id, kind, exclude, hidden_docs, limit);
         }
-        term_info.sort_by_key(|(_, count, _)| *count);
-        let (anchor_start, anchor_count, _) = term_info[0];
+        term_info.sort_by_key(|(_, count, _, _)| *count);
+        let (anchor_start, anchor_count, anchor_end, _) = term_info[0];
         let max_candidates = 50_000usize;
-        let active_off = read_u64(ib, 48) as usize;
-        let docs_off = read_u64(ib, 24) as usize;
-        let anchor_postings = self.decode_postings(anchor_start, anchor_count)?;
+        let active = self.active_bits()?;
+        let anchor_postings = self.decode_postings(anchor_start, anchor_count, anchor_end)?;
         let mut extra_maps: Vec<Option<HashMap<u32, u32>>> = Vec::with_capacity(term_info.len());
-        for (index, (start, count, _)) in term_info.iter().enumerate() {
+        for (index, (start, count, end, _)) in term_info.iter().enumerate() {
             if index == 0 {
                 extra_maps.push(None);
             } else {
                 extra_maps.push(Some(
-                    self.decode_postings(*start, *count)?
+                    self.decode_postings(*start, *count, *end)?
                         .into_iter()
                         .collect::<HashMap<_, _>>(),
                 ));
             }
         }
+        let candidates: Vec<(u32, u32)> = anchor_postings
+            .into_iter()
+            .take(max_candidates)
+            .filter(|(doc_idx, _)| {
+                exclude != Some(*doc_idx)
+                    && !hidden_docs.is_some_and(|hidden| hidden.contains(doc_idx))
+                    && active[*doc_idx as usize / 8] & (1 << (*doc_idx % 8)) != 0
+            })
+            .collect();
+        let candidate_docs: Vec<u32> = candidates.iter().map(|(doc_idx, _)| *doc_idx).collect();
+        let metas = self.index().doc_meta_batch(&candidate_docs)?;
         let mut results = Vec::new();
-        for (doc_idx, anchor_tf) in anchor_postings.into_iter().take(max_candidates) {
-            if exclude == Some(doc_idx)
-                || hidden_docs.is_some_and(|hidden| hidden.contains(&doc_idx))
-                || ib[active_off + doc_idx as usize / 8] & (1 << (doc_idx % 8)) == 0
+        for ((doc_idx, anchor_tf), meta) in candidates.into_iter().zip(metas) {
+            if scope_id.is_some_and(|value| meta.scope_id != value)
+                || kind.is_some_and(|value| meta.kind != value)
             {
                 continue;
             }
-            let meta_offset = docs_off + doc_idx as usize * DOC_SIZE;
-            let scope = read_u32(ib, meta_offset + 16);
-            let kind_value = ib[meta_offset + 28];
-            if scope_id.is_some_and(|value| scope != value)
-                || kind.is_some_and(|value| kind_value != value)
-            {
-                continue;
-            }
-            let token_count = read_u32(ib, docs_off + doc_idx as usize * DOC_SIZE + 12) as f64;
+            let token_count = meta.token_count as f64;
             let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
             let mut score = 0.0;
-            for (index, (_, _, idf)) in term_info.iter().enumerate() {
+            for (index, (_, _, _, idf)) in term_info.iter().enumerate() {
                 let tf = if index == 0 {
                     anchor_tf as f64
                 } else {
@@ -664,8 +1193,9 @@ impl Store {
         let mut skipped = offset;
         let mut out = Vec::new();
         let doc_count = self.doc_count();
+        let active = self.active_bits()?;
         for idx in 0..doc_count {
-            if !self.is_active(idx)? {
+            if active[idx as usize / 8] & (1 << (idx % 8)) == 0 {
                 continue;
             }
             let meta = self.doc_meta(idx)?;
@@ -702,10 +1232,25 @@ impl Store {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct DocMeta {
     pub block_id: u32,
     pub offset_in_block: u32,
     pub record_len: u32,
+    pub token_count: u32,
+    pub scope_id: u32,
+    pub kind: u8,
+}
+
+fn parse_doc_meta(raw: &[u8]) -> DocMeta {
+    DocMeta {
+        block_id: u32::from_le_bytes(raw[0..4].try_into().unwrap()),
+        offset_in_block: u32::from_le_bytes(raw[4..8].try_into().unwrap()),
+        record_len: u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+        token_count: u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+        scope_id: u32::from_le_bytes(raw[16..20].try_into().unwrap()),
+        kind: raw[28],
+    }
 }
 
 impl TailView {
@@ -1413,7 +1958,7 @@ pub(crate) fn checkpoint_file(path: &Path, in_place: bool) -> Result<Header> {
         }
     };
     let tail = store.tail_view()?;
-    let mut index_raw = store.index().to_vec();
+    let mut index_raw = store.index().to_vec()?;
     let changed = mask_index_hidden(&mut store, &mut index_raw, &tail.hidden)?;
 
     if !in_place || current.flags & HEADER_FLAG_DUAL == 0 || partial_index.is_some() {
@@ -1834,7 +2379,13 @@ fn put_varint(out: &mut Vec<u8>, mut value: usize) {
     out.push(value as u8);
 }
 
-fn take_varint(data: &[u8], cursor: &mut usize) -> Result<usize> {
+const POSTING_STRIDE: usize = 8;
+
+fn read_posting_tf_index(index: &Index, offset: usize) -> Result<u32> {
+    index.read_u32(offset + 4)
+}
+
+fn take_varint_slice(data: &[u8], cursor: &mut usize) -> Result<usize> {
     let mut value = 0usize;
     let mut shift = 0u32;
     loop {
@@ -1853,26 +2404,11 @@ fn take_varint(data: &[u8], cursor: &mut usize) -> Result<usize> {
     }
 }
 
-fn posting_stride(_index: &[u8]) -> usize {
-    8
-}
-
-fn read_posting_tf(data: &[u8], offset: usize, stride: usize) -> u32 {
-    if stride == 6 {
-        u16::from_le_bytes(data[offset + 4..offset + 6].try_into().unwrap()) as u32
-    } else {
-        read_u32(data, offset + 4)
-    }
-}
-
 fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 fn read_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
-}
-fn read_f64(data: &[u8], offset: usize) -> f64 {
-    f64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 fn write_u32(data: &mut [u8], offset: usize, value: u32) {
     data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -2075,6 +2611,149 @@ mod tests {
 
         data[HEADER_SLOT] = b'X';
         assert!(read_current_header_with_slot(&data).is_err());
+    }
+
+    fn convert_to_single_blob(path: &Path) {
+        let data = fs::read(path).expect("read page store");
+        let header = read_current_header(&data).expect("header");
+        let index_raw = read_index_raw(&data, &header).expect("materialize index");
+        let table_off = header.block_table_off as usize;
+        let block_count = header.block_count as usize;
+        let mut blocks = Vec::with_capacity(block_count);
+        for block_id in 0..block_count {
+            let entry = table_off + block_id * BLOCK_ENTRY;
+            let offset = read_u64(&data, entry) as usize;
+            let comp_len = read_u32(&data, entry + 8) as usize;
+            blocks.push(data[offset..offset + 16 + comp_len].to_vec());
+        }
+        let tail = data[header.tail_start as usize..].to_vec();
+        let compressed = zstd::bulk::compress(&index_raw, ZSTD_LEVEL).expect("compress index");
+        let block_table_off = DUAL_HEADER_LEN;
+        let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
+        let data_start = index_off + compressed.len();
+        let mut block_offsets = Vec::with_capacity(block_count);
+        let mut cursor = data_start;
+        for block in &blocks {
+            block_offsets.push(cursor);
+            cursor += block.len();
+        }
+        let header = Header {
+            created_at: header.created_at,
+            block_table_off: block_table_off as u64,
+            block_count: block_count as u64,
+            index_off: index_off as u64,
+            index_len: compressed.len() as u64,
+            index_raw_len: index_raw.len() as u64,
+            index_hash: xxh3_64(&index_raw),
+            data_start: data_start as u64,
+            tail_start: cursor as u64,
+            doc_count: header.doc_count,
+            generation: 1,
+            flags: HEADER_FLAG_DUAL,
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(&encode_header(&header));
+        out.extend_from_slice(&encode_header(&header));
+        for (block, offset) in blocks.iter().zip(block_offsets) {
+            let mut entry = [0u8; BLOCK_ENTRY];
+            write_u64(&mut entry, 0, offset as u64);
+            write_u32(&mut entry, 8, (block.len() - 16) as u32);
+            write_u32(&mut entry, 12, read_u32(block, 4));
+            write_u64(&mut entry, 16, read_u64(block, 8));
+            out.extend_from_slice(&entry);
+        }
+        out.extend_from_slice(&compressed);
+        for block in blocks {
+            out.extend_from_slice(&block);
+        }
+        out.extend_from_slice(&tail);
+        fs::write(path, out).expect("write single-blob store");
+    }
+
+    #[test]
+    fn opens_legacy_single_blob_index() {
+        let path = empty_indexed_store();
+        let first = new_memory(
+            "fact",
+            "test",
+            "first subject",
+            "first body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        let second = new_memory(
+            "fact",
+            "test",
+            "second subject",
+            "second body",
+            "audit",
+            0.9,
+            Vec::new(),
+            None,
+            None,
+        );
+        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
+        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
+        reindex_file(&path).expect("reindex");
+        convert_to_single_blob(&path);
+
+        let header = read_header_file(&path).expect("single-blob header");
+        assert_eq!(header.flags & HEADER_FLAG_PAGE_INDEX, 0);
+        let mut store = Store::open(&path).expect("open single blob");
+        assert_eq!(store.doc_count(), 2);
+        let memories = store.scan_page(usize::MAX, 0).expect("scan");
+        assert_eq!(memories.len(), 2);
+        assert_eq!(
+            store.find_doc(&first.id).expect("find").map(|(_, m)| m.id),
+            Some(first.id.clone())
+        );
+        assert_eq!(store.scope_id("test").expect("scope"), Some(0));
+        assert_eq!(
+            store
+                .bm25("first", None, None, None, None, 10)
+                .expect("bm25")
+                .len(),
+            1
+        );
+        assert_eq!(verify_full(&path).expect("verify"), 2);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn doc_meta_batch_matches_individual_reads() {
+        let path = empty_indexed_store();
+        for index in 0..300 {
+            let memory = new_memory(
+                "fact",
+                "test",
+                &format!("subject {index}"),
+                &format!("body {index}"),
+                "audit",
+                0.9,
+                Vec::new(),
+                None,
+                None,
+            );
+            append_record(&path, T_MEMORY, &memory_payload(&memory), true).expect("append");
+        }
+        reindex_file(&path).expect("reindex");
+        let store = Store::open(&path).expect("open");
+        let indices: Vec<u32> = (0..300).collect();
+        let batch = store.index().doc_meta_batch(&indices).expect("batch");
+        assert_eq!(batch.len(), indices.len());
+        for (idx, meta) in indices.iter().zip(batch) {
+            let single = store.doc_meta(*idx).expect("single");
+            assert_eq!(meta.block_id, single.block_id);
+            assert_eq!(meta.offset_in_block, single.offset_in_block);
+            assert_eq!(meta.record_len, single.record_len);
+            assert_eq!(meta.token_count, single.token_count);
+            assert_eq!(meta.scope_id, single.scope_id);
+            assert_eq!(meta.kind, single.kind);
+        }
+        cleanup(&path);
     }
 
     #[test]

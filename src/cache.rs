@@ -12,8 +12,6 @@ use crate::model::now_ms;
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
 const CACHE_VERSION: u8 = 1;
 const CACHE_HEADER: usize = 64;
-const MAX_CACHE_SIZE: usize = 256 * 1024 * 1024;
-const MIN_CACHE_SIZE: usize = 8 * 1024 * 1024;
 const HOT_BUDGET: usize = 8 * 1024 * 1024;
 const SLOT_SIZE: usize = 64 * 1024;
 const ENTRY_SIZE: usize = 32;
@@ -40,13 +38,6 @@ enum CacheData {
 }
 
 impl CacheData {
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Mmap(mmap) => mmap,
-            Self::Memory(bytes) => bytes,
-        }
-    }
-
     fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
             Self::Mmap(mmap) => mmap,
@@ -61,17 +52,16 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
-    pub(crate) fn open_existing(
-        store_path: &Path,
-        index_hash: u64,
-        index_len: usize,
-    ) -> Option<Self> {
+    /// The cache holds only decompressed data blocks. `index_len` is always
+    /// zero in the header: the index itself lives in the store and is read
+    /// lazily through `store::Index`.
+    pub(crate) fn open_existing(store_path: &Path, index_hash: u64) -> Option<Self> {
         let path = cache_path(store_path);
-        let (size, _, table_cap, _, slot_count, sketch_off) = layout(index_len).ok()?;
+        let (size, _, table_cap, _, slot_count, sketch_off) = layout().ok()?;
         let mmap = open_mmap(&path).ok()?;
         let header = decode_header(&mmap)?;
         if header.index_hash == index_hash
-            && header.index_len == index_len as u64
+            && header.index_len == 0
             && header.table_cap == table_cap as u32
             && header.slot_count == slot_count as u32
             && header.sketch_off == sketch_off as u32
@@ -90,10 +80,9 @@ impl Cache {
     /// into place. Existing readers keep their old mapping valid; a cache file
     /// is never truncated underneath a mapping. The header is written last so
     /// a partially-created file can never validate.
-    pub(crate) fn create(store_path: &Path, index_hash: u64, index_raw: &[u8]) -> Result<Self> {
+    pub(crate) fn create(store_path: &Path, index_hash: u64) -> Result<Self> {
         let path = cache_path(store_path);
-        let (size, table_off, table_cap, data_off, slot_count, sketch_off) =
-            layout(index_raw.len())?;
+        let (size, table_off, table_cap, data_off, slot_count, sketch_off) = layout()?;
         let tmp = temp_cache_path(&path);
         let _ = fs::remove_file(&tmp);
         let mut file = OpenOptions::new()
@@ -103,11 +92,9 @@ impl Cache {
             .with_context(|| format!("create cache {}", tmp.display()))?;
         let build = (|| -> Result<()> {
             file.set_len(size as u64)?;
-            file.seek(SeekFrom::Start(CACHE_HEADER as u64))?;
-            file.write_all(index_raw)?;
             let header = CacheHeader {
                 index_hash,
-                index_len: index_raw.len() as u64,
+                index_len: 0,
                 table_off: table_off as u64,
                 table_cap: table_cap as u32,
                 slot_size: SLOT_SIZE as u32,
@@ -133,7 +120,7 @@ impl Cache {
         }
         let header = CacheHeader {
             index_hash,
-            index_len: index_raw.len() as u64,
+            index_len: 0,
             table_off: table_off as u64,
             table_cap: table_cap as u32,
             slot_size: SLOT_SIZE as u32,
@@ -154,12 +141,11 @@ impl Cache {
     /// In-memory fallback used when the disposable cache cannot be created
     /// (read-only directory, concurrent replacement, full disk). Reads must
     /// not fail just because the cache is unavailable.
-    pub(crate) fn memory(index_hash: u64, index_raw: &[u8]) -> Result<Self> {
-        let (size, table_off, table_cap, data_off, slot_count, sketch_off) =
-            layout(index_raw.len())?;
+    pub(crate) fn memory(index_hash: u64) -> Result<Self> {
+        let (size, table_off, table_cap, data_off, slot_count, sketch_off) = layout()?;
         let header = CacheHeader {
             index_hash,
-            index_len: index_raw.len() as u64,
+            index_len: 0,
             table_off: table_off as u64,
             table_cap: table_cap as u32,
             slot_size: SLOT_SIZE as u32,
@@ -169,15 +155,10 @@ impl Cache {
         };
         let mut data = vec![0u8; size];
         data[..CACHE_HEADER].copy_from_slice(&encode_header(&header));
-        data[CACHE_HEADER..CACHE_HEADER + index_raw.len()].copy_from_slice(index_raw);
         Ok(Self {
             data: CacheData::Memory(data),
             header,
         })
-    }
-
-    pub(crate) fn index(&self) -> &[u8] {
-        &self.data.as_slice()[CACHE_HEADER..CACHE_HEADER + self.header.index_len as usize]
     }
 
     pub(crate) fn get_block<F>(&mut self, block_id: u32, decompress: F) -> Result<Vec<u8>>
@@ -270,9 +251,11 @@ fn temp_cache_path(path: &Path) -> PathBuf {
     ))
 }
 
-fn layout(index_len: usize) -> Result<(usize, usize, usize, usize, usize, usize)> {
-    let size = (index_len + HOT_BUDGET).clamp(MIN_CACHE_SIZE, MAX_CACHE_SIZE);
-    let table_off = align8(CACHE_HEADER + index_len);
+fn layout() -> Result<(usize, usize, usize, usize, usize, usize)> {
+    // The block cache is deliberately fixed at the hot budget; the index is
+    // no longer copied here.
+    let size = HOT_BUDGET;
+    let table_off = align8(CACHE_HEADER);
     let available = size.saturating_sub(table_off);
     // Use the hot budget for slots, not for unused table entries. Reserve a
     // small TinyLFU frequency sketch before the block slots.
@@ -287,7 +270,7 @@ fn layout(index_len: usize) -> Result<(usize, usize, usize, usize, usize, usize)
             return Ok((size, table_off, cap, data_off, slots, sketch_off));
         }
         if cap <= 1 {
-            bail!("index too large for cache");
+            bail!("cache layout does not fit");
         }
         cap -= 1;
     }
@@ -389,8 +372,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cm-cache-test-{}", crate::model::new_id()));
         fs::create_dir_all(&dir).expect("create temp dir");
         let store = dir.join("cm");
-        let (_, _, cap, _, _, _) = layout(0).expect("layout");
-        let mut cache = Cache::create(&store, 7, &[]).expect("create cache");
+        let (_, _, cap, _, _, _) = layout().expect("layout");
+        let mut cache = Cache::create(&store, 7).expect("create cache");
         for id in 1..=cap as u32 {
             for _ in 0..2 {
                 cache
@@ -412,8 +395,8 @@ mod tests {
 
     #[test]
     fn layout_uses_all_hot_slots() {
-        let (size, _table_off, cap, data_off, slots, sketch_off) =
-            layout(105_764_624).expect("layout");
+        let (size, _table_off, cap, data_off, slots, sketch_off) = layout().expect("layout");
+        assert_eq!(size, HOT_BUDGET);
         assert_eq!(cap, slots);
         assert!(sketch_off < data_off);
         assert!(data_off + slots * SLOT_SIZE <= size);
@@ -424,25 +407,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cm-cache-test-{}", crate::model::new_id()));
         fs::create_dir_all(&dir).expect("create temp dir");
         let store = dir.join("cm");
-        let index = vec![7u8; 1024];
-        let cache = Cache::create(&store, 42, &index).expect("create cache");
-        assert_eq!(cache.index(), &index[..]);
+        let mut cache = Cache::create(&store, 42).expect("create cache");
+        let block = cache
+            .get_block(7, || Ok(vec![7u8; 1024]))
+            .expect("fill block");
+        assert_eq!(block.len(), 1024);
         drop(cache);
 
-        let reopened = Cache::open_existing(&store, 42, index.len()).expect("reopen cache");
-        assert_eq!(reopened.index(), &index[..]);
-        assert!(Cache::open_existing(&store, 43, index.len()).is_none());
+        let mut reopened = Cache::open_existing(&store, 42).expect("reopen cache");
+        let block = reopened
+            .get_block(7, || panic!("block cache did not persist"))
+            .expect("cached block");
+        assert_eq!(block[0], 7);
+        assert!(Cache::open_existing(&store, 43).is_none());
         drop(reopened);
 
-        let replacement = vec![9u8; 2048];
-        let cache2 = Cache::create(&store, 43, &replacement).expect("replace cache");
-        assert_eq!(cache2.index(), &replacement[..]);
-        drop(cache2);
-        let reopened2 = Cache::open_existing(&store, 43, replacement.len()).expect("reopened");
-        assert_eq!(reopened2.index(), &replacement[..]);
-
-        let memory = Cache::memory(42, &index).expect("memory cache");
-        assert_eq!(memory.index(), &index[..]);
+        let mut memory = Cache::memory(42).expect("memory cache");
+        let block = memory
+            .get_block(9, || Ok(vec![9u8; 512]))
+            .expect("memory block");
+        assert_eq!(block[0], 9);
         fs::remove_dir_all(&dir).ok();
     }
 }

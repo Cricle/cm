@@ -161,6 +161,7 @@ regression checks, not as a general accuracy claim.
 - `cm checkpoint` reuses immutable compressed blocks; `--in-place` appends only dirty 64 KiB index pages and commits via dual headers.
 - Memory payloads use a schema-aware presence map with varint lengths; defaults are omitted. `cm reindex` re-encodes old records into the compact schema.
 - The index uses 8-byte ID-hash slots and delta-varint postings; older index versions remain readable.
+- `cm.cache` holds only decompressed blocks (8 MiB); index pages are loaded from the `cm` page table on demand through an in-process page cache.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded block cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
@@ -182,11 +183,15 @@ Measured on a 1,000,030-record store (Windows x64, release build):
 
 | Operation | p95 |
 |---|---:|
-| `scan --limit 100` | ~7 ms |
+| `scan --limit 100` | ~11 ms |
 | `get --id` | ~6 ms |
 | `similar --top 16` | ~11 ms |
 | `append` | ~8 ms |
-| `search --top 8` | ~8 ms |
+| `search --top 8` | ~16 ms |
+
+With lazy index pages, cold 1M `status` is ~22 ms, `scan --limit 100` ~11 ms,
+and `search` ~15 ms; `cm.cache` is 8 MiB instead of ~114 MiB. Warm queries stay
+under 30 ms.
 
 `checkpoint` (cold process, 1M records) measured ~1.2s; 10k ~20ms.
 `checkpoint --in-place` measured ~0.13s / 1M and ~9ms / 10k, adding only one

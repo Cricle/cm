@@ -725,7 +725,10 @@ fn search_out(
 ) -> Result<SearchOut> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
-    let scope_id = scope.as_deref().and_then(|value| store.scope_id(value));
+    let scope_id = match scope.as_deref() {
+        Some(value) => store.scope_id(value)?,
+        None => None,
+    };
     let kind_id = match kind.as_deref() {
         Some(value) => match kind_id(value) {
             Some(id) => Some(id),
@@ -834,7 +837,10 @@ fn cmd_context(
     if min_rank < 0 && min_trust.is_some() {
         bail!("invalid trust level {:?}", min_trust);
     }
-    let scope_id = scope.as_deref().and_then(|value| store.scope_id(value));
+    let scope_id = match scope.as_deref() {
+        Some(value) => store.scope_id(value)?,
+        None => None,
+    };
     let kind_id = match kind.as_deref() {
         Some(value) => match kind_id(value) {
             Some(id) => Some(id),
@@ -954,7 +960,7 @@ fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Resu
         )
     };
     let scope = scope.as_deref().unwrap_or(&target.scope);
-    let scope_id = store.scope_id(scope);
+    let scope_id = store.scope_id(scope)?;
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if let Some(scope_id) = scope_id {
         for (doc_idx, score) in store.bm25(
@@ -1222,7 +1228,7 @@ fn cmd_doctor(path: &Path) -> Result<bool> {
             }
             Err(error) => {
                 store_ok = false;
-                active_total = store.active_count();
+                active_total = store.active_count().unwrap_or(0);
                 warnings.push(format!("active scan failed: {error:#}"));
             }
         },
@@ -1257,7 +1263,7 @@ fn cmd_doctor(path: &Path) -> Result<bool> {
 
 fn active_metrics(store: &mut Store) -> Result<(u64, usize)> {
     let tail = store.tail_view()?;
-    let mut active_index = store.active_count();
+    let mut active_index = store.active_count()?;
     for id in &tail.hidden {
         if let Some((idx, _)) = store.find_doc(id)? {
             if store.is_active(idx)? {
@@ -1331,7 +1337,7 @@ fn cmd_consolidate(
     let mut dsu = Dsu::new(memories.len());
     let mut pair_scores: HashMap<(usize, usize), (&'static str, f64)> = HashMap::new();
     for (i, (doc_idx, memory)) in memories.iter().enumerate() {
-        let scope_id = store.scope_id(&memory.scope);
+        let scope_id = store.scope_id(&memory.scope)?;
         let kind = kind_id(&memory.kind);
         for (j, _) in store.bm25(
             &format!("{} {}", memory.subject, memory.text),
@@ -1677,7 +1683,7 @@ mod tests {
     fn test_active_total(path: &Path) -> u64 {
         let mut store = Store::open(path).expect("open");
         let tail = store.tail_view().expect("tail");
-        let mut active = store.active_count();
+        let mut active = store.active_count().expect("active count");
         for id in &tail.hidden {
             if let Some((idx, _)) = store.find_doc(id).expect("find hidden") {
                 if store.is_active(idx).expect("active") {
