@@ -83,8 +83,10 @@ tail-only check to avoid decoding every record on each write.
 problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,
 and evictions. `frame` stores the current task's goal, status, constraints,
 next steps, open questions, and touched paths as a normal memory record; updates
-supersede the previous frame. Read commands may create or update the disposable
-`cm.cache` cache; `cm` remains unchanged.
+supersede the previous frame. `feedback` records useful/stale/wrong signals;
+`govern` turns them into verify/forget suggestions and only applies forgets with
+`--apply`. Read commands may create or update the disposable `cm.cache` cache;
+`cm` remains unchanged.
 
 ## Advanced commands
 
@@ -101,6 +103,8 @@ cm cache-stats [--file cm]
 cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--next <text>]... [--open <text>]... [--touch <path>]...
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
+cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
+cm govern [--apply] [--stale-days 90] [--wrong-threshold 2] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]

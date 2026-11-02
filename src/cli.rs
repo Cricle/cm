@@ -23,6 +23,8 @@ use crate::store::{
 const SKILL_TEXT: &str = include_str!("../assets/SKILL.md");
 const FRAME_SCOPE: &str = "__cm_frame__";
 const FRAME_KIND: &str = "frame";
+const FEEDBACK_SCOPE: &str = "__cm_feedback__";
+const FEEDBACK_KIND: &str = "feedback";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaskFrame {
@@ -39,6 +41,15 @@ struct TaskFrame {
     touches: Vec<String>,
     #[serde(default)]
     notes: Vec<String>,
+    updated_at: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Feedback {
+    target: String,
+    signal: String,
+    #[serde(default)]
+    note: Option<String>,
     updated_at: u64,
 }
 
@@ -302,6 +313,8 @@ pub fn run() -> Result<()> {
         "status" => cmd_verify(&arg_path(&args), false),
         "cache-stats" => cmd_cache_stats(&arg_path(&args)),
         "frame" => cmd_frame(&arg_path(&args), &args),
+        "feedback" | "use" => cmd_feedback(&arg_path(&args), &args),
+        "govern" => cmd_govern(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -419,6 +432,8 @@ fn print_usage() {
          cm frame set --task <id> --goal <text> [--next <text>] [--open <text>]
          cm frame get --task <id>
          cm frame list
+         cm feedback --id <id> [--signal useful|stale|wrong]
+         cm govern [--apply] [--stale-days 90]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -937,6 +952,143 @@ fn cmd_frame_list(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn cmd_feedback(path: &Path, args: &[String]) -> Result<()> {
+    let ids = arg_values(args, "--id");
+    if ids.is_empty() {
+        bail!("feedback requires at least one --id");
+    }
+    let signal = arg_value(args, "--signal").unwrap_or_else(|| "useful".to_string());
+    if !matches!(signal.as_str(), "useful" | "stale" | "wrong") {
+        bail!("invalid feedback signal {signal:?}; expected useful/stale/wrong");
+    }
+    let note = arg_value(args, "--note");
+    let now = crate::model::now_ms();
+    let source = arg_value(args, "--source").unwrap_or_else(|| "agent".to_string());
+    for id in &ids {
+        let feedback = Feedback {
+            target: id.clone(),
+            signal: signal.clone(),
+            note: note.clone(),
+            updated_at: now,
+        };
+        let input = AppendInput {
+            kind: FEEDBACK_KIND.to_string(),
+            scope: FEEDBACK_SCOPE.to_string(),
+            subject: format!("feedback:{id}"),
+            text: serde_json::to_string(&feedback)?,
+            source: source.clone(),
+            confidence: 1.0,
+            valid_from: now,
+            valid_to: None,
+            supersedes: Vec::new(),
+            conflict_of: None,
+            trust: Some("authored".to_string()),
+            source_commit: None,
+        };
+        let memory = memory_from_input(&input)?;
+        append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    }
+    outln!(
+        "{}",
+        json!({"ok": true, "count": ids.len(), "signal": signal})
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct FeedbackStats {
+    useful: u32,
+    stale: u32,
+    wrong: u32,
+    last: u64,
+}
+
+fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
+    let apply = has_flag(args, "--apply");
+    let stale_days = arg_usize(args, "--stale-days", 90) as u64;
+    let wrong_threshold = arg_usize(args, "--wrong-threshold", 2).max(1) as u32;
+    let mut store = Store::open(path)?;
+    let memories = active_memories(&mut store)?;
+    let mut feedback: HashMap<String, FeedbackStats> = HashMap::new();
+    for memory in &memories {
+        if memory.kind != FEEDBACK_KIND {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Feedback>(&memory.text) else {
+            continue;
+        };
+        let stats = feedback.entry(item.target).or_default();
+        match item.signal.as_str() {
+            "useful" => stats.useful += 1,
+            "stale" => stats.stale += 1,
+            "wrong" => stats.wrong += 1,
+            _ => {}
+        }
+        stats.last = stats.last.max(item.updated_at);
+    }
+    let now = crate::model::now_ms();
+    let mut suggestions = Vec::new();
+    for memory in &memories {
+        if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
+            continue;
+        }
+        let stats = feedback.get(&memory.id);
+        let useful = stats.map_or(0, |s| s.useful);
+        let stale = stats.map_or(0, |s| s.stale);
+        let wrong = stats.map_or(0, |s| s.wrong);
+        let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
+        let score = i64::from(useful) * 2 - i64::from(stale) - i64::from(wrong) * 3;
+        let (action, reason) = if wrong >= wrong_threshold || score <= -3 {
+            ("forget", "negative feedback")
+        } else if stale >= 2 || (age_days >= stale_days && useful == 0) {
+            ("verify", "stale or unverified")
+        } else {
+            continue;
+        };
+        suggestions.push(json!({
+            "id": memory.id,
+            "kind": memory.kind,
+            "scope": memory.scope,
+            "subject": memory.subject,
+            "action": action,
+            "reason": reason,
+            "age_days": age_days,
+            "score": score,
+            "useful": useful,
+            "stale": stale,
+            "wrong": wrong
+        }));
+    }
+    suggestions.sort_by(|a, b| {
+        a["action"]
+            .as_str()
+            .cmp(&b["action"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    suggestions.truncate(200);
+    let mut forgotten = Vec::new();
+    if apply {
+        for suggestion in &suggestions {
+            if suggestion["action"] == "forget" {
+                if let Some(id) = suggestion["id"].as_str() {
+                    cmd_forget(path, id)?;
+                    forgotten.push(id.to_string());
+                }
+            }
+        }
+    }
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ok": true,
+            "apply": apply,
+            "suggestions": suggestions,
+            "forgotten": forgotten
+        }))?
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_search(
     path: &Path,
@@ -995,7 +1147,9 @@ pub(crate) fn search_out(
         },
         None => None,
     };
-    let allow_frame = kind.as_deref() == Some(FRAME_KIND);
+    let allow_meta = kind
+        .as_deref()
+        .is_some_and(|kind| kind == FRAME_KIND || kind == FEEDBACK_KIND);
     let min_rank = match min_trust.as_deref() {
         Some(value) => trust_rank(value),
         None => -1,
@@ -1033,7 +1187,7 @@ pub(crate) fn search_out(
     let mut candidates: Vec<SearchHit> = hits
         .into_values()
         .filter(|(bm25, memory)| {
-            (allow_frame || memory.kind != FRAME_KIND)
+            (allow_meta || (memory.kind != FRAME_KIND && memory.kind != FEEDBACK_KIND))
                 && *bm25 >= min_score
                 && (include_expired || memory.valid_to.is_none_or(|end| end > now))
                 && trust_rank(&memory.trust) >= min_rank
@@ -1111,7 +1265,9 @@ fn cmd_context(
         },
         None => None,
     };
-    let allow_frame = kind.as_deref() == Some(FRAME_KIND);
+    let allow_meta = kind
+        .as_deref()
+        .is_some_and(|kind| kind == FRAME_KIND || kind == FEEDBACK_KIND);
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if scope.is_none() || scope_id.is_some() {
         for (doc_idx, score) in store.bm25(
@@ -1144,7 +1300,7 @@ fn cmd_context(
         .filter(|(score, memory)| {
             let not_expired = memory.valid_to.is_none_or(|end| end > now);
             let trust_ok = trust_rank(&memory.trust) >= min_rank;
-            (allow_frame || memory.kind != FRAME_KIND)
+            (allow_meta || (memory.kind != FRAME_KIND && memory.kind != FEEDBACK_KIND))
                 && *score >= min_score
                 && not_expired
                 && trust_ok
@@ -1396,6 +1552,9 @@ fn active_memories(store: &mut Store) -> Result<Vec<crate::model::Memory>> {
 fn conflict_groups(memories: Vec<crate::model::Memory>) -> Vec<ConflictGroupOut> {
     let mut groups: HashMap<(String, String, String), Vec<crate::model::Memory>> = HashMap::new();
     for memory in memories {
+        if memory.kind == FRAME_KIND || memory.kind == FEEDBACK_KIND {
+            continue;
+        }
         groups
             .entry((
                 memory.scope.clone(),

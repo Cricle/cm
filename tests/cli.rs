@@ -166,6 +166,62 @@ fn task_flag_is_accepted_and_tags_the_cache_working_set() {
 }
 
 #[test]
+fn feedback_governs_negative_memories() {
+    let dir = temp_dir("govern");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remember = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "bad",
+            "--text",
+            "bad fact",
+            "--scope",
+            "repo",
+            "--source",
+            "README",
+        ],
+    );
+    assert_ok(&remember);
+    let id = serde_json::from_slice::<serde_json::Value>(&remember.stdout).expect("remember json")
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for _ in 0..2 {
+        assert_ok(&run(
+            &dir,
+            &[
+                "feedback",
+                "--file",
+                file_arg,
+                "--id",
+                &id,
+                "--signal",
+                "wrong",
+                "--note",
+                "incorrect",
+            ],
+        ));
+    }
+    let govern = run(&dir, &["govern", "--file", file_arg]);
+    assert_ok(&govern);
+    let report: serde_json::Value = serde_json::from_slice(&govern.stdout).expect("govern json");
+    assert_eq!(report["suggestions"][0]["action"], "forget");
+    assert_ok(&run(&dir, &["govern", "--file", file_arg, "--apply"]));
+    assert!(!run(&dir, &["get", "--file", file_arg, "--id", &id])
+        .status
+        .success());
+    assert_ok(&run(&dir, &["doctor", "--strict", "--file", file_arg]));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn task_frame_roundtrip_and_reindex() {
     let dir = temp_dir("frame");
     let file = dir.join("cm");

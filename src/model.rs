@@ -14,6 +14,7 @@ pub(crate) const KINDS: &[&str] = &[
     "episode",
     "procedure",
     "frame",
+    "feedback",
 ];
 
 pub(crate) const F_TEXT: u8 = 1;
