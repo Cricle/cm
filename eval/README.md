@@ -72,3 +72,27 @@ All tasks passed in both modes. On these small one-shot tasks, `cm` added about
 boundary is therefore: skip memory for trivial one-shot work; use it when work
 spans sessions, requires prior decisions, or the repository is large enough that
 re-discovery is expensive. The harness is designed to measure those cases.
+
+### Why the overhead: turn amplification
+
+A follow-up cache_bug run removed the ritual calls (`brief` + `recall` +
+`remember` + help probes) and kept only one `brief`:
+
+| Mode | Success | Tokens | Tool uses | Wall time |
+|---|---|---:|---:|---:|
+| with cm, one `brief` | yes | 143,119 | 8 | 41.5s |
+| without cm | yes | 118,935 | 6 | 36.2s |
+
+The optimized protocol reduced overhead from +57.8% to +20.3% tokens, but did not
+make cm useful: `brief` saved zero file reads because the task prompt and tests
+already contained the needed facts, and the workspace had only two source files.
+The remaining +24k tokens came from two extra tool turns (one `cm brief` and one
+malformed agent call). Each extra turn re-sends the whole conversation and tool
+context, so the cost is roughly 12k tokens per turn here — far more than the
+1.3KB `cm brief` output.
+
+This is the central rule: **cm must eliminate more tool turns than it adds**.
+A session-start `brief` is only net positive when it replaces at least two
+discovery/read turns, which requires prior context not already in the prompt and
+navigational `path:symbol` sources in a repository large enough to search.
+

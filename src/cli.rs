@@ -245,6 +245,8 @@ struct BriefMemory {
     text: String,
     source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    source_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     source_commit: Option<String>,
 }
 
@@ -256,6 +258,7 @@ impl From<&crate::model::Memory> for BriefMemory {
             subject: memory.subject.clone(),
             text: memory.text.clone(),
             source: memory.source.clone(),
+            source_line: memory.source_line,
             source_commit: memory.source_commit.clone(),
         }
     }

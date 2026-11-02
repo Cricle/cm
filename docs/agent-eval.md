@@ -55,6 +55,28 @@ overhead. `cm` is for cross-session continuity, accumulated decisions, and large
 repositories where re-discovery is expensive; it should be skipped for trivial
 one-shot edits.
 
+## Why it is pure overhead
+
+A follow-up cache_bug run replaced the ritual `brief` + `recall` + `remember` +
+help probes with one `brief`:
+
+| Mode | Success | Tokens | Tool uses | Wall time |
+|---|---|---:|---:|---:|
+| with cm, one brief | yes | 143,119 | 8 | 41.5s |
+| without cm | yes | 118,935 | 6 | 36.2s |
+
+Overhead fell from +57.8% to +20.3%, but remained pure cost: the brief saved zero
+file reads because the prompt/tests already contained the facts and the workspace
+was tiny. The remaining +24k tokens were two extra turns (brief plus one
+malformed call); each turn re-sends the full conversation/tool context, about
+12k tokens here, versus a 1.3KB brief output.
+
+The design rule is therefore: **cm must remove more tool turns than it adds.**
+Use `brief` once, do not follow it with `recall` unless a fact is missing, and do
+not write a memory for a one-shot task. Memory sources must be `path:symbol`
+pointers so the first read is the right file.
+
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;

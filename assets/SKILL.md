@@ -9,7 +9,7 @@ description: Use when a coding project contains a `cm` memory file, or when the 
 
 Use it when work spans sessions, depends on prior decisions, or the repository is
 large enough that re-discovery is costly. Skip it for trivial one-shot edits:
-measured short tasks paid 40–55% extra tokens/tools for no file-read savings.
+measured short tasks paid 20–55% extra tokens/tools for no file-read savings.
 
 ## Locate
 
@@ -25,6 +25,10 @@ If this skill is unavailable, run `cm skill` or `cm skill --install`.
 ```bash
 $CM recall --file "$F" --query "<task>" --scope <scope> [--task <work-item>] --budget 800
 ```
+
+Use `brief` once at session start. Call `recall` only when the brief is missing a
+specific fact; do not run both as a ritual. Each extra CLI turn re-sends the
+whole conversation context, so turn count is more expensive than output size.
 
 `--task` is optional. Use a stable id for the current work item so the disposable
 `cm.cache` keeps this task's blocks; it never changes retrieval or ranking.
@@ -70,7 +74,9 @@ tasks are active; pass `--query` when no frame exists.
 
 ## Write
 
-For read-only tasks, skip write-back. Otherwise:
+For read-only tasks, skip write-back. For one-shot edits, skip write-back too:
+write only when a non-obvious decision must survive into a later session.
+Otherwise:
 
 ```bash
 $CM remember --file "$F" --kind decision --scope <scope> \

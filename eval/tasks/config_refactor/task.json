@@ -1,7 +1,17 @@
 {
   "id": "config_refactor",
   "goal": "Rename the legacy config key old_timeout to timeout across the package",
-  "next": ["find all old_timeout references", "rename the key and accessor", "run the config tests"],
-  "constraints": ["no compatibility alias for old_timeout"],
-  "prompt": "Rename the legacy config key old_timeout to timeout across the package. Update every reference and run the test suite."
+  "next": [
+    "find all old_timeout references",
+    "rename the key and accessor",
+    "run the config tests"
+  ],
+  "constraints": [
+    "no compatibility alias for old_timeout"
+  ],
+  "prompt": "Rename the legacy config key old_timeout to timeout across the package. Update every reference and run the test suite.",
+  "touches": [
+    "src/config.py",
+    "src/app.py"
+  ]
 }

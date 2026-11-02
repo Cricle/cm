@@ -1,2 +1,2 @@
-{"kind":"procedure","scope":"repo","subject":"median implementation","text":"median sorts the values; odd length returns the middle item, even length averages the two middle items.","source":"agent:seed","trust":"authored","confidence":0.9}
-{"kind":"constraint","scope":"repo","subject":"stats api","text":"Do not change the existing mean behavior or signature.","source":"agent:seed","trust":"authored","confidence":0.9}
+{"kind": "procedure", "scope": "repo", "subject": "median implementation", "text": "median sorts the values; odd length returns the middle item, even length averages the two middle items.", "source": "src/stats.py:mean", "trust": "authored", "confidence": 0.9}
+{"kind": "constraint", "scope": "repo", "subject": "stats api", "text": "Do not change the existing mean behavior or signature.", "source": "src/stats.py:mean", "trust": "authored", "confidence": 0.9}

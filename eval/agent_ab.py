@@ -120,6 +120,8 @@ def seed_memory(cm: str, task: dict, workspace: Path) -> str:
         cmd += ["--next", step]
     for constraint in task.get("constraints", []):
         cmd += ["--constraint", constraint]
+    for touch in task.get("touches", []):
+        cmd += ["--touch", touch]
     must_run(cmd, workspace)
     return str(memory)
 
@@ -131,11 +133,11 @@ def task_prompt(cm: str, task: dict, mode: str, memory: str) -> str:
         "You are working in a repository with a cm memory sidecar.\n"
         f"cm binary: {cm}\n"
         f"memory file: {memory}\n\n"
-        "Start by running this once, then follow its next steps and cited sources:\n"
-        f"  {cm} brief --file {memory} --task current --budget 1200\n\n"
-        "Use `cm recall --file ... --task current --query ...` before opening files. "
-        "After a decision, write one `cm remember` record with `--source path:symbol`. "
-        "Do not write progress logs or transcripts.\n\n"
+        "At session start run this exactly once:\n"
+        f'  "{cm}" brief --file "{memory}" --task current --budget 1200\n\n'
+        "Do not call `cm recall` in the same pass unless the brief is missing a "
+        "specific fact. Do not write a cm record for a one-shot task; write one "
+        "only when a non-obvious decision must survive into a later session.\n\n"
         "Task:\n"
         f"{task['prompt'].strip()}\n"
     )

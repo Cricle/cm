@@ -1,7 +1,16 @@
 {
   "id": "cache_bug",
   "goal": "Fix the cache update path without changing its public API",
-  "next": ["run the cache tests", "fix the update-vs-eviction branch", "rerun all tests"],
-  "constraints": ["keep Cache.get and Cache.put signatures unchanged"],
-  "prompt": "Fix the failing cache tests. Keep the public API unchanged. Run the test suite before finishing."
+  "next": [
+    "run the cache tests",
+    "fix the update-vs-eviction branch",
+    "rerun all tests"
+  ],
+  "constraints": [
+    "keep Cache.get and Cache.put signatures unchanged"
+  ],
+  "prompt": "Fix the failing cache tests. Keep the public API unchanged. Run the test suite before finishing.",
+  "touches": [
+    "src/cache.py"
+  ]
 }
