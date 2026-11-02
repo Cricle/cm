@@ -13,7 +13,7 @@ use crate::model::now_ms;
 
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
 const CACHE_VERSION: u8 = 1;
-const CACHE_LAYOUT: u8 = 4;
+const CACHE_LAYOUT: u8 = 1;
 const CACHE_HEADER: usize = 80;
 const HEADER_HITS: usize = 56;
 const HEADER_MISSES: usize = 60;

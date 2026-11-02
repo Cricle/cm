@@ -33,7 +33,7 @@ fn cache_tags(cache: &Path) -> Vec<(u32, u32)> {
     let data = fs::read(cache).expect("read cm.cache");
     assert_eq!(&data[0..4], b"CMLU");
     assert_eq!(data[4], 1, "cache version stays 1");
-    assert_eq!(data[5], 4, "affinity layout");
+    assert_eq!(data[5], 1, "affinity layout");
     let table_off = u64::from_le_bytes(data[24..32].try_into().unwrap()) as usize;
     let cap = u32::from_le_bytes(data[32..36].try_into().unwrap()) as usize;
     let mut tags = Vec::new();

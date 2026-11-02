@@ -33,10 +33,8 @@ pub(crate) const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
 const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
 pub(crate) const DOC_SIZE: usize = 32;
-pub(crate) const HASH_SLOT: usize = 16;
 const HASH_SLOT8: usize = 8;
-const INDEX_VERSION_HASH8: u8 = 2;
-const INDEX_VERSION_DELTA: u8 = 4;
+const INDEX_VERSION: u8 = 1;
 pub(crate) const INDEX_HEADER: usize = 128;
 const MAGIC: &[u8; 4] = b"CM1\0";
 const VERSION: u8 = 1;
@@ -920,33 +918,22 @@ impl Store {
     }
 
     pub(crate) fn find_doc(&mut self, id: &str) -> Result<Option<(u32, Memory)>> {
-        let (hash_cap, hash_off, version) = {
+        let (hash_cap, hash_off) = {
             let ib = self.index();
-            (ib.read_u32(20)?, ib.read_u64(32)? as usize, ib.read_u8(4)?)
+            (ib.read_u32(20)?, ib.read_u64(32)? as usize)
         };
-        let hash8 = version >= INDEX_VERSION_HASH8;
         let hash = xxh3_64(id.as_bytes());
-        let hash_slot = if hash8 { HASH_SLOT8 } else { HASH_SLOT };
         let mut slot = (hash as usize) & (hash_cap as usize - 1);
         for _ in 0..hash_cap {
             let (entry_hash, doc_idx) = {
                 let ib = self.index();
-                let offset = hash_off + slot * hash_slot;
-                if hash8 {
-                    (ib.read_u32(offset)? as u64, ib.read_u32(offset + 4)?)
-                } else {
-                    (ib.read_u64(offset)?, ib.read_u32(offset + 8)?)
-                }
+                let offset = hash_off + slot * HASH_SLOT8;
+                (ib.read_u32(offset)?, ib.read_u32(offset + 4)?)
             };
             if doc_idx == u32::MAX {
                 return Ok(None);
             }
-            let hash_matches = if hash8 {
-                entry_hash == (hash & u32::MAX as u64)
-            } else {
-                entry_hash == hash
-            };
-            if hash_matches {
+            if entry_hash == hash as u32 {
                 let meta = self.doc_meta(doc_idx)?;
                 if self.is_active(doc_idx)? {
                     let memory = self.doc_memory(&meta)?;
@@ -1027,42 +1014,35 @@ impl Store {
         if count == 0 {
             return Ok(postings);
         }
-        if ib.read_u8(4)? >= INDEX_VERSION_DELTA {
-            if ib.is_paged() {
-                // The varint cursor is convenient for the single-blob path,
-                // but per-byte page checks are expensive. For page indexes
-                // read the exact posting extent and decode it as a slice.
-                let begin = postings_off + start as usize;
-                let len = end.saturating_sub(start) as usize;
-                let bytes = ib.read_bytes(begin, len)?;
-                let mut cursor = 0usize;
-                let mut previous = 0u32;
-                for _ in 0..count {
-                    let delta = take_varint_slice(&bytes, &mut cursor)? as u32;
-                    let doc_idx = previous
-                        .checked_add(delta)
-                        .context("posting delta overflow")?;
-                    let tf = take_varint_slice(&bytes, &mut cursor)? as u32;
-                    postings.push((doc_idx, tf));
-                    previous = doc_idx;
-                }
-            } else {
-                let mut cursor = ib.cursor(postings_off + start as usize);
-                let mut previous = 0u32;
-                for _ in 0..count {
-                    let delta = cursor.varint()? as u32;
-                    let doc_idx = previous
-                        .checked_add(delta)
-                        .context("posting delta overflow")?;
-                    let tf = cursor.varint()? as u32;
-                    postings.push((doc_idx, tf));
-                    previous = doc_idx;
-                }
+        if ib.is_paged() {
+            // The varint cursor is convenient for the single-blob path, but
+            // per-byte page checks are expensive. For page indexes read the
+            // exact posting extent and decode it as a slice.
+            let begin = postings_off + start as usize;
+            let len = end.saturating_sub(start) as usize;
+            let bytes = ib.read_bytes(begin, len)?;
+            let mut cursor = 0usize;
+            let mut previous = 0u32;
+            for _ in 0..count {
+                let delta = take_varint_slice(&bytes, &mut cursor)? as u32;
+                let doc_idx = previous
+                    .checked_add(delta)
+                    .context("posting delta overflow")?;
+                let tf = take_varint_slice(&bytes, &mut cursor)? as u32;
+                postings.push((doc_idx, tf));
+                previous = doc_idx;
             }
         } else {
-            for i in 0..count {
-                let offset = postings_off + (start as usize + i as usize) * POSTING_STRIDE;
-                postings.push((ib.read_u32(offset)?, read_posting_tf_index(ib, offset)?));
+            let mut cursor = ib.cursor(postings_off + start as usize);
+            let mut previous = 0u32;
+            for _ in 0..count {
+                let delta = cursor.varint()? as u32;
+                let doc_idx = previous
+                    .checked_add(delta)
+                    .context("posting delta overflow")?;
+                let tf = cursor.varint()? as u32;
+                postings.push((doc_idx, tf));
+                previous = doc_idx;
             }
         }
         Ok(postings)
@@ -2260,7 +2240,7 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
 
     let mut index = vec![0u8; index_len];
     write_u32(&mut index, 0, 0x31584449);
-    index[4] = INDEX_VERSION_DELTA;
+    index[4] = INDEX_VERSION;
     index[6..8].copy_from_slice(&(INDEX_HEADER as u16).to_le_bytes());
     write_u32(&mut index, 8, n as u32);
     write_u32(&mut index, 12, scopes.len() as u32);
@@ -2454,12 +2434,6 @@ fn put_varint(out: &mut Vec<u8>, mut value: usize) {
         value >>= 7;
     }
     out.push(value as u8);
-}
-
-const POSTING_STRIDE: usize = 8;
-
-fn read_posting_tf_index(index: &Index, offset: usize) -> Result<u32> {
-    index.read_u32(offset + 4)
 }
 
 fn take_varint_slice(data: &[u8], cursor: &mut usize) -> Result<usize> {

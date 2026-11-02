@@ -190,7 +190,7 @@ regression checks, not as a general accuracy claim.
 - Memory payloads use a schema-aware presence map with varint lengths; defaults are omitted. `cm reindex` re-encodes old records into the compact schema.
 - The index uses 8-byte ID-hash slots and delta-varint postings; older index versions remain readable.
 - `cm.cache` holds decompressed data blocks and hot 64 KiB index pages (8 MiB); cold index pages are loaded from the `cm` page table on demand through an in-process page cache.
-- Header version byte remains `1`.
+- Header version byte remains `1`. Index, cache header, and cache layout versions also stay `1` until the first public release.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded, disk-backed block/index-page cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
 - Cache entries carry scope and task affinity tags. Scope is the primary eviction priority; task is a tie-break and prefetch tag, so alternating tasks share the cache instead of wiping each other. Query result blocks and index pages are prefetched/tagged. This is a single-workspace working-set accelerator, not a global knowledge cache.
