@@ -272,6 +272,7 @@ pub fn run() -> Result<()> {
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
+        "cache-stats" => cmd_cache_stats(&arg_path(&args)),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -385,6 +386,7 @@ fn print_usage() {
          cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800]
          cm forget --file cm --id <id>
          cm status [--file cm]
+         cm cache-stats [--file cm]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -685,6 +687,26 @@ fn cmd_scan(path: &Path, limit: usize, offset: usize) -> Result<()> {
     for memory in store.scan_page(limit.min(5000), offset)? {
         outln!("{}", cmx_line(&memory));
     }
+    Ok(())
+}
+
+fn cmd_cache_stats(path: &Path) -> Result<()> {
+    let store = Store::open(path)?;
+    let stats = store.cache_stats()?;
+    outln!(
+        "{}",
+        json!({
+            "ok": true,
+            "bytes": stats.bytes,
+            "capacity": stats.capacity,
+            "entries": stats.entries,
+            "data_entries": stats.data_entries,
+            "index_entries": stats.index_entries,
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "evictions": stats.evictions
+        })
+    );
     Ok(())
 }
 

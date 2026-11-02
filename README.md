@@ -57,6 +57,7 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<task>" [--scope <scope>] [--task <task>] [--budget 800] [--full]
 cm forget --file cm --id <id>
 cm status [--file cm]
+cm cache-stats [--file cm]
 cm doctor [--strict] [--file cm]
 cm skill [--json] [--install] [--check]
 ```
@@ -77,8 +78,9 @@ duplicate; `append`/`import` never deduplicate. Large indexes use the cheap
 tail-only check to avoid decoding every record on each write.
 
 `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
-problem. Read commands may create or update the disposable `cm.cache` cache; `cm`
-remains unchanged.
+problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,
+and evictions. Read commands may create or update the disposable `cm.cache`
+cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -91,6 +93,7 @@ cm checkpoint [--in-place] [--file cm]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
+cm cache-stats [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
@@ -234,6 +237,11 @@ Working-set checks:
   measured ~16 ms average because both working sets fit in 8 MiB. The task tag
   is therefore a tie-break/prefetch hint, not a frequency override; it does not
   hurt the plain path.
+- 1M diverse synthetic corpus (1M records, 191 MB store): single-term
+  `search` measured 27–32 ms warm and a three-term query 45–48 ms; the cache
+  held 95 index pages plus 8 data blocks (capacity 127). Doc metadata pages are
+  deliberately decompressed in batches and kept out of the shared cache; caching
+  them displaced hot postings pages and measured slower.
 - 1M page-index store, 20-term query: 32–48 ms warm including process startup;
   the query touched 126 index pages and one data block, using all 127 cache
   slots. Alternating two long task queries measured 21.3 ms average with
@@ -241,6 +249,9 @@ Working-set checks:
 - 8 concurrent processes × 30 mixed queries: 240/240 succeeded; 64 concurrent
   long queries on the 1M store also succeeded. Cache entries carry XXH3
   checksums so a torn slot falls back to the store.
+- Agent A/B on the same read-only cache review: with one `cm recall` call the
+  subagent used 307k tokens / 17 tool uses / 3 source files; without cm it used
+  604k tokens / 26 tool uses / 5 files. Single run; model- and task-dependent.
 
 ## Development
 

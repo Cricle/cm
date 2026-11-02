@@ -33,7 +33,7 @@ fn cache_tags(cache: &Path) -> Vec<(u32, u32)> {
     let data = fs::read(cache).expect("read cm.cache");
     assert_eq!(&data[0..4], b"CMLU");
     assert_eq!(data[4], 1, "cache version stays 1");
-    assert_eq!(data[5], 3, "affinity layout");
+    assert_eq!(data[5], 4, "affinity layout");
     let table_off = u64::from_le_bytes(data[24..32].try_into().unwrap()) as usize;
     let cap = u32::from_le_bytes(data[32..36].try_into().unwrap()) as usize;
     let mut tags = Vec::new();
@@ -138,6 +138,14 @@ fn task_flag_is_accepted_and_tags_the_cache_working_set() {
     assert!(
         tags.iter().any(|(scope, task)| *scope != 0 && *task != 0),
         "query must tag cached blocks with scope and task: {tags:?}"
+    );
+    let stats = run(&dir, &["cache-stats", "--file", file_arg]);
+    assert_ok(&stats);
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout).expect("cache stats json");
+    assert!(stats["entries"].as_u64().unwrap_or(0) > 0);
+    assert!(
+        stats["hits"].as_u64().unwrap_or(0) + stats["misses"].as_u64().unwrap_or(0) > 0,
+        "cache stats must count accesses: {stats}"
     );
 
     assert_ok(&run(

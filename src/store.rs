@@ -10,7 +10,7 @@ use fs2::FileExt;
 use memmap2::Mmap;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheStats};
 use crate::model::{
     content_hash, decode_fields, decode_memory, get_text, kind_id, memory_payload, now_ms,
     tokenize, Memory,
@@ -382,7 +382,6 @@ fn read_doc_meta_page(
     }
     Ok(())
 }
-
 enum IndexStorage {
     /// Legacy single-blob index, already decompressed into memory.
     Blob(Vec<u8>),
@@ -835,6 +834,14 @@ impl Store {
         if let Ok(mut cache) = self.cache.lock() {
             cache.set_affinity(scope, task);
         }
+    }
+
+    pub(crate) fn cache_stats(&self) -> Result<CacheStats> {
+        let cache = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow!("cache lock poisoned"))?;
+        Ok(cache.stats())
     }
 
     /// Warm the blocks belonging to selected memory ids. This makes the

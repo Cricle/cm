@@ -13,8 +13,12 @@ use crate::model::now_ms;
 
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
 const CACHE_VERSION: u8 = 1;
-const CACHE_LAYOUT: u8 = 3;
-const CACHE_HEADER: usize = 64;
+const CACHE_LAYOUT: u8 = 4;
+const CACHE_HEADER: usize = 80;
+const HEADER_HITS: usize = 56;
+const HEADER_MISSES: usize = 60;
+const HEADER_EVICTIONS: usize = 64;
+const HEADER_HASH: usize = 68;
 pub(crate) const HOT_BUDGET: usize = 8 * 1024 * 1024;
 pub(crate) const SLOT_SIZE: usize = 64 * 1024;
 const ENTRY_SIZE: usize = 48;
@@ -40,6 +44,21 @@ pub(crate) struct CacheHeader {
     pub slot_count: u32,
     pub data_off: u64,
     pub sketch_off: u32,
+    pub hits: u32,
+    pub misses: u32,
+    pub evictions: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CacheStats {
+    pub capacity: u32,
+    pub entries: u32,
+    pub data_entries: u32,
+    pub index_entries: u32,
+    pub hits: u32,
+    pub misses: u32,
+    pub evictions: u32,
+    pub bytes: u64,
 }
 
 enum CacheData {
@@ -49,6 +68,13 @@ enum CacheData {
 
 impl CacheData {
     fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Mmap(mmap) => mmap,
+            Self::Memory(bytes) => bytes,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
         match self {
             Self::Mmap(mmap) => mmap,
             Self::Memory(bytes) => bytes,
@@ -145,6 +171,9 @@ impl Cache {
                 slot_count: slot_count as u32,
                 data_off: data_off as u64,
                 sketch_off: sketch_off as u32,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
             };
             let encoded = encode_header(&header);
             file.seek(SeekFrom::Start(0))?;
@@ -189,6 +218,9 @@ impl Cache {
             slot_count: slot_count as u32,
             data_off: data_off as u64,
             sketch_off: sketch_off as u32,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
         };
         Ok(Self {
             data: CacheData::Mmap(mmap),
@@ -213,6 +245,9 @@ impl Cache {
             slot_count: slot_count as u32,
             data_off: data_off as u64,
             sketch_off: sketch_off as u32,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
         };
         let mut data = vec![0u8; size];
         data[..CACHE_HEADER].copy_from_slice(&encode_header(&header));
@@ -328,6 +363,9 @@ impl Cache {
         }
         let slot = victim as u32;
         let start = data_off + slot as usize * SLOT_SIZE;
+        if victim_len > 0 {
+            bump_stat(data, HEADER_EVICTIONS);
+        }
         data[start..start + block.len()].copy_from_slice(&block);
         write_u32(data, victim_offset, key);
         write_u32(data, victim_offset + ENTRY_HITS, 1);
@@ -363,8 +401,43 @@ impl Cache {
         let active_task_tag = self.active_task_tag;
         let data = self.data.as_mut_slice();
         let block = lookup_locked(data, &self.header, active_scope_tag, active_task_tag, key);
+        if block.is_some() {
+            bump_stat(data, HEADER_HITS);
+        } else {
+            bump_stat(data, HEADER_MISSES);
+        }
         drop(guard);
         Ok(block)
+    }
+
+    pub(crate) fn stats(&self) -> CacheStats {
+        let data = self.data.as_slice();
+        let table_start = self.header.table_off as usize;
+        let cap = self.header.table_cap as usize;
+        let mut entries = 0u32;
+        let mut data_entries = 0u32;
+        let mut index_entries = 0u32;
+        for i in 0..cap {
+            let offset = table_start + i * ENTRY_SIZE;
+            if read_u32(data, offset + ENTRY_LEN) > 0 {
+                entries += 1;
+                if read_u32(data, offset) & 0x8000_0000 != 0 {
+                    index_entries += 1;
+                } else {
+                    data_entries += 1;
+                }
+            }
+        }
+        CacheStats {
+            capacity: cap as u32,
+            entries,
+            data_entries,
+            index_entries,
+            hits: read_u32(data, HEADER_HITS),
+            misses: read_u32(data, HEADER_MISSES),
+            evictions: read_u32(data, HEADER_EVICTIONS),
+            bytes: data.len() as u64,
+        }
     }
 }
 
@@ -480,8 +553,13 @@ fn encode_header(header: &CacheHeader) -> [u8; CACHE_HEADER] {
     bytes[40..44].copy_from_slice(&header.slot_count.to_le_bytes());
     bytes[44..48].copy_from_slice(&header.sketch_off.to_le_bytes());
     bytes[48..56].copy_from_slice(&header.data_off.to_le_bytes());
+    bytes[HEADER_HITS..HEADER_HITS + 4].copy_from_slice(&header.hits.to_le_bytes());
+    bytes[HEADER_MISSES..HEADER_MISSES + 4].copy_from_slice(&header.misses.to_le_bytes());
+    bytes[HEADER_EVICTIONS..HEADER_EVICTIONS + 4].copy_from_slice(&header.evictions.to_le_bytes());
+    // Counters are intentionally outside the checksum: they are advisory
+    // statistics and must not invalidate the whole cache when torn.
     let hash = xxh3_64(&bytes[0..56]);
-    bytes[56..64].copy_from_slice(&hash.to_le_bytes());
+    bytes[HEADER_HASH..HEADER_HASH + 8].copy_from_slice(&hash.to_le_bytes());
     bytes
 }
 
@@ -490,7 +568,8 @@ fn decode_header(mmap: &[u8]) -> Option<CacheHeader> {
         || &mmap[0..4] != CACHE_MAGIC
         || mmap[4] != CACHE_VERSION
         || mmap[5] != CACHE_LAYOUT
-        || xxh3_64(&mmap[0..56]) != u64::from_le_bytes(mmap[56..64].try_into().ok()?)
+        || xxh3_64(&mmap[0..56])
+            != u64::from_le_bytes(mmap[HEADER_HASH..HEADER_HASH + 8].try_into().ok()?)
     {
         return None;
     }
@@ -503,6 +582,13 @@ fn decode_header(mmap: &[u8]) -> Option<CacheHeader> {
         slot_count: u32::from_le_bytes(mmap[40..44].try_into().ok()?),
         data_off: u64::from_le_bytes(mmap[48..56].try_into().ok()?),
         sketch_off: u32::from_le_bytes(mmap[44..48].try_into().ok()?),
+        hits: u32::from_le_bytes(mmap[HEADER_HITS..HEADER_HITS + 4].try_into().ok()?),
+        misses: u32::from_le_bytes(mmap[HEADER_MISSES..HEADER_MISSES + 4].try_into().ok()?),
+        evictions: u32::from_le_bytes(
+            mmap[HEADER_EVICTIONS..HEADER_EVICTIONS + 4]
+                .try_into()
+                .ok()?,
+        ),
     })
 }
 
@@ -572,6 +658,9 @@ fn read_u64(data: &[u8], offset: usize) -> u64 {
 }
 fn write_u32(data: &mut [u8], offset: usize, value: u32) {
     data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+fn bump_stat(data: &mut [u8], offset: usize) {
+    write_u32(data, offset, read_u32(data, offset).saturating_add(1));
 }
 fn write_u64(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());

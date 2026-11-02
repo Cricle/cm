@@ -124,7 +124,7 @@ fn concurrent_searches_keep_cache_consistent() {
 
     let cache = fs::read(dir.join("cm.cache")).expect("read cache");
     assert_eq!(&cache[0..4], b"CMLU");
-    assert_eq!(cache[5], 3, "cache layout");
+    assert_eq!(cache[5], 4, "cache layout");
     let table_off = u64::from_le_bytes(cache[24..32].try_into().unwrap()) as usize;
     let cap = u32::from_le_bytes(cache[32..36].try_into().unwrap()) as usize;
     let entries = (0..cap)

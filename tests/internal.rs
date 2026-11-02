@@ -284,6 +284,28 @@ mod cache_tests {
     }
 
     #[test]
+    fn cache_stats_count_entries_hits_and_misses() {
+        let dir = env::temp_dir().join(format!("cm-cache-stats-{}", model::new_id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let store = dir.join("cm");
+        let mut cache = Cache::create(&store, 7).expect("create cache");
+        cache
+            .get_block(1, || Ok(vec![1u8; 1024]))
+            .expect("miss and insert");
+        cache.get_block(1, || panic!("expected hit")).expect("hit");
+        cache
+            .get_block(1 << 31, || Ok(vec![2u8; 1024]))
+            .expect("index page");
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.data_entries, 1);
+        assert_eq!(stats.index_entries, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn affinity_protects_the_hot_block_across_task_switch() {
         let dir = env::temp_dir().join(format!("cm-cache-working-set-{}", model::new_id()));
         fs::create_dir_all(&dir).expect("create temp dir");
