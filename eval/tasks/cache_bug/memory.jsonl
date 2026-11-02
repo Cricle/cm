@@ -1,0 +1,2 @@
+{"kind":"decision","scope":"repo","subject":"cache eviction","text":"Cache is FIFO by insertion order. Updating an existing key must not evict another key.","source":"agent:seed","trust":"authored","confidence":0.9}
+{"kind":"constraint","scope":"repo","subject":"cache api","text":"Keep the Cache constructor and get/put signatures unchanged.","source":"agent:seed","trust":"authored","confidence":0.9}

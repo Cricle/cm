@@ -1,0 +1,7 @@
+{
+  "id": "feature_median",
+  "goal": "Add median to the stats module while preserving mean",
+  "next": ["read the stats tests", "implement median", "run all tests"],
+  "constraints": ["do not change mean"],
+  "prompt": "Implement median in src/stats.py so all tests pass. Do not change the existing mean function."
+}

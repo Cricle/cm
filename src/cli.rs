@@ -9,6 +9,7 @@ use std::process;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::model::{
     build_merged, cmx_line, content_hash, estimate_tokens, kind_id, memory_payload, memory_snippet,
@@ -41,6 +42,10 @@ struct TaskFrame {
     touches: Vec<String>,
     #[serde(default)]
     notes: Vec<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    lease_until: Option<u64>,
     updated_at: u64,
 }
 
@@ -125,6 +130,10 @@ pub(crate) struct MemoryOut {
     trust: Option<String>,
     #[serde(default)]
     source_commit: Option<String>,
+    #[serde(default)]
+    source_hash: Option<String>,
+    #[serde(default)]
+    source_line: Option<u32>,
 }
 
 impl MemoryOut {
@@ -152,6 +161,8 @@ impl MemoryOut {
             conflict_of: self.conflict_of,
             trust: self.trust.unwrap_or_else(|| "authored".to_string()),
             source_commit: self.source_commit,
+            source_hash: self.source_hash,
+            source_line: self.source_line,
         }
     }
 }
@@ -177,6 +188,8 @@ impl From<&crate::model::Memory> for MemoryOut {
             conflict_of: memory.conflict_of.clone(),
             trust: Some(memory.trust.clone()),
             source_commit: memory.source_commit.clone(),
+            source_hash: memory.source_hash.clone(),
+            source_line: memory.source_line,
         }
     }
 }
@@ -346,6 +359,9 @@ pub fn run() -> Result<()> {
         "status" => cmd_verify(&arg_path(&args), false),
         "cache-stats" => cmd_cache_stats(&arg_path(&args)),
         "frame" => cmd_frame(&arg_path(&args), &args),
+        "claim" => cmd_claim(&arg_path(&args), &args),
+        "release" => cmd_release(&arg_path(&args), &args),
+        "finish" => cmd_finish(&arg_path(&args), &args),
         "feedback" | "use" => cmd_feedback(&arg_path(&args), &args),
         "govern" => cmd_govern(&arg_path(&args), &args),
         "audit" => cmd_audit(&arg_path(&args), &args),
@@ -428,14 +444,6 @@ pub fn run() -> Result<()> {
                 arg_value(&args, "--sources").ok_or_else(|| anyhow!("merge requires --sources"))?;
             cmd_merge(&arg_path(&args), &sources, arg_value(&args, "--text"))
         }
-        "consolidate" => cmd_consolidate(
-            &arg_path(&args),
-            has_flag(&args, "--apply"),
-            arg_usize(&args, "--top", 8),
-            arg_usize(&args, "--limit", 50),
-            arg_usize(&args, "--offset", 0),
-            arg_f64(&args, "--threshold", 0.85),
-        ),
         "forget" => {
             let id = arg_value(&args, "--id").ok_or_else(|| anyhow!("forget requires --id"))?;
             cmd_forget(&arg_path(&args), &id)
@@ -468,6 +476,9 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm brief [--task <id>|current] [--budget 1200]
+         cm claim --task <id>|current --owner <id> [--lease 30]
+         cm release --task <id>|current [--owner <id>]
+         cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
          cm audit [--root <dir>] [--apply]
@@ -922,8 +933,36 @@ fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::V
         "open": frame.open,
         "touches": frame.touches,
         "notes": frame.notes,
+        "owner": frame.owner,
+        "lease_until": frame.lease_until,
         "updated_at": frame.updated_at
     })
+}
+
+fn save_frame(
+    path: &Path,
+    frame: &TaskFrame,
+    existing_id: Option<String>,
+    source: &str,
+    source_commit: Option<String>,
+) -> Result<crate::model::Memory> {
+    let input = AppendInput {
+        kind: FRAME_KIND.to_string(),
+        scope: FRAME_SCOPE.to_string(),
+        subject: frame_subject(&frame.task),
+        text: serde_json::to_string(frame)?,
+        source: source.to_string(),
+        confidence: 1.0,
+        valid_from: frame.updated_at,
+        valid_to: None,
+        supersedes: existing_id.into_iter().collect(),
+        conflict_of: None,
+        trust: Some("authored".to_string()),
+        source_commit,
+    };
+    let memory = memory_from_input(&input)?;
+    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    Ok(memory)
 }
 
 fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
@@ -945,6 +984,8 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
             open: Vec::new(),
             touches: Vec::new(),
             notes: Vec::new(),
+            owner: None,
+            lease_until: None,
             updated_at: 0,
         });
     frame.task = task.clone();
@@ -959,6 +1000,10 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
             bail!("invalid frame status {status:?}; expected active/paused/done");
         }
         frame.status = status;
+        if frame.status == "done" {
+            frame.owner = None;
+            frame.lease_until = None;
+        }
     }
     append_values(&mut frame.constraints, arg_values(args, "--constraint"));
     append_values(&mut frame.next, arg_values(args, "--next"));
@@ -967,22 +1012,14 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
     append_values(&mut frame.notes, arg_values(args, "--note"));
     frame.updated_at = crate::model::now_ms();
 
-    let input = AppendInput {
-        kind: FRAME_KIND.to_string(),
-        scope: FRAME_SCOPE.to_string(),
-        subject: frame_subject(&task),
-        text: serde_json::to_string(&frame)?,
-        source: arg_value(args, "--source").unwrap_or_else(|| "agent".to_string()),
-        confidence: 1.0,
-        valid_from: frame.updated_at,
-        valid_to: None,
-        supersedes: existing_id.into_iter().collect(),
-        conflict_of: None,
-        trust: Some("authored".to_string()),
-        source_commit: arg_value(args, "--source-commit"),
-    };
-    let memory = memory_from_input(&input)?;
-    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
+    let source = arg_value(args, "--source").unwrap_or_else(|| "agent".to_string());
+    let memory = save_frame(
+        path,
+        &frame,
+        existing_id,
+        &source,
+        arg_value(args, "--source-commit"),
+    )?;
     outln!(
         "{}",
         json!({"ok": true, "id": memory.id, "task": task, "status": frame.status})
@@ -1013,6 +1050,129 @@ fn cmd_frame_list(path: &Path) -> Result<()> {
         .filter_map(|memory| parse_frame(memory).map(|frame| frame_json(memory, &frame)))
         .collect();
     outln!("{}", serde_json::to_string(&frames)?);
+    Ok(())
+}
+
+fn cmd_claim(path: &Path, args: &[String]) -> Result<()> {
+    let owner = arg_value(args, "--owner").ok_or_else(|| anyhow!("claim requires --owner"))?;
+    let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
+    let lease_minutes = arg_usize(args, "--lease", 30).max(1) as u64;
+    let mut store = Store::open(path)?;
+    let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
+        .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
+    let now = crate::model::now_ms();
+    if let Some(existing) = frame.owner.as_deref() {
+        if existing != owner && frame.lease_until.is_some_and(|end| end > now) {
+            bail!(
+                "task {:?} is held by {} until {}",
+                frame.task,
+                existing,
+                frame.lease_until.unwrap_or(0)
+            );
+        }
+    }
+    let lease_until = now.saturating_add(lease_minutes.saturating_mul(60_000));
+    frame.owner = Some(owner.clone());
+    frame.lease_until = Some(lease_until);
+    frame.updated_at = now;
+    let saved = save_frame(path, &frame, Some(memory.id), "agent:claim", None)?;
+    outln!(
+        "{}",
+        json!({
+            "ok": true,
+            "id": saved.id,
+            "task": frame.task,
+            "owner": owner,
+            "lease_until": lease_until
+        })
+    );
+    Ok(())
+}
+
+fn cmd_release(path: &Path, args: &[String]) -> Result<()> {
+    let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
+    let owner = arg_value(args, "--owner");
+    let mut store = Store::open(path)?;
+    let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
+        .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
+    let now = crate::model::now_ms();
+    if let (Some(requested), Some(existing)) = (owner.as_deref(), frame.owner.as_deref()) {
+        if requested != existing && frame.lease_until.is_some_and(|end| end > now) {
+            bail!("task {:?} is held by {}", frame.task, existing);
+        }
+    }
+    frame.owner = None;
+    frame.lease_until = None;
+    frame.updated_at = now;
+    let saved = save_frame(path, &frame, Some(memory.id), "agent:release", None)?;
+    outln!(
+        "{}",
+        json!({"ok": true, "id": saved.id, "task": frame.task, "released": true})
+    );
+    Ok(())
+}
+
+fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
+    let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
+    let summary = arg_value(args, "--summary");
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
+    let apply = has_flag(args, "--apply");
+    let mut store = Store::open(path)?;
+    let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
+        .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
+    frame.status = "done".to_string();
+    frame.owner = None;
+    frame.lease_until = None;
+    frame.updated_at = crate::model::now_ms();
+    if let Some(summary) = summary.as_deref() {
+        let note = format!("finished: {summary}");
+        if !frame.notes.contains(&note) {
+            frame.notes.push(note);
+        }
+    }
+    let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None)?;
+
+    let summary_id = if let Some(summary) = summary.as_deref() {
+        let input = AppendInput {
+            kind: "episode".to_string(),
+            scope: arg_value(args, "--scope").unwrap_or_else(|| "repo".to_string()),
+            subject: format!("task:{} summary", frame.task),
+            text: summary.to_string(),
+            source: "agent:finish".to_string(),
+            confidence: 0.9,
+            valid_from: 0,
+            valid_to: None,
+            supersedes: Vec::new(),
+            conflict_of: None,
+            trust: Some("authored".to_string()),
+            source_commit: None,
+        };
+        let summary_memory = memory_from_input(&input)?;
+        append_record(
+            path,
+            crate::store::T_MEMORY,
+            &memory_payload(&summary_memory),
+            true,
+        )?;
+        Some(summary_memory.id)
+    } else {
+        None
+    };
+
+    let audit = run_audit(path, &root, apply)?;
+    let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
+    outln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ok": true,
+            "task": frame.task,
+            "status": frame.status,
+            "frame_id": frame_memory.id,
+            "summary_id": summary_id,
+            "audit": audit,
+            "govern": govern
+        }))?
+    );
     Ok(())
 }
 
@@ -1079,11 +1239,26 @@ struct FeedbackStats {
 }
 
 fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
-    let apply = has_flag(args, "--apply");
-    let merge = has_flag(args, "--merge");
-    let stale_days = arg_usize(args, "--stale-days", 90) as u64;
-    let wrong_threshold = arg_usize(args, "--wrong-threshold", 2).max(1) as u32;
-    let merge_threshold = arg_f64(args, "--merge-threshold", 0.85);
+    let report = run_govern(
+        path,
+        has_flag(args, "--apply"),
+        has_flag(args, "--merge"),
+        arg_usize(args, "--stale-days", 90) as u64,
+        arg_usize(args, "--wrong-threshold", 2).max(1) as u32,
+        arg_f64(args, "--merge-threshold", 0.85),
+    )?;
+    outln!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn run_govern(
+    path: &Path,
+    apply: bool,
+    merge: bool,
+    stale_days: u64,
+    wrong_threshold: u32,
+    merge_threshold: f64,
+) -> Result<serde_json::Value> {
     let merged_groups = if merge {
         if apply {
             // Consolidation walks the index; fold tail records in first so a
@@ -1205,18 +1380,14 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
             }
         }
     }
-    outln!(
-        "{}",
-        serde_json::to_string(&json!({
-            "ok": true,
-            "apply": apply,
-            "conflicts": conflicts.len(),
-            "merged_groups": merged_groups,
-            "suggestions": suggestions,
-            "forgotten": forgotten
-        }))?
-    );
-    Ok(())
+    Ok(json!({
+        "ok": true,
+        "apply": apply,
+        "conflicts": conflicts.len(),
+        "merged_groups": merged_groups,
+        "suggestions": suggestions,
+        "forgotten": forgotten
+    }))
 }
 
 fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
@@ -1241,9 +1412,71 @@ fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
     }
 }
 
+fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
+    if let Some(symbol) = symbol {
+        let lines: Vec<&str> = text.lines().collect();
+        let index = lines.iter().position(|line| line.contains(symbol))?;
+        let start = index.saturating_sub(2);
+        let end = (index + 40).min(lines.len());
+        let excerpt = lines[start..end].join("\n");
+        Some((
+            (index + 1) as u32,
+            format!("{:016x}", xxh3_64(excerpt.as_bytes())),
+        ))
+    } else {
+        Some((0, format!("{:016x}", xxh3_64(text.as_bytes()))))
+    }
+}
+
+fn source_anchor(source: &str) -> Option<(u32, String)> {
+    let (relative, symbol) = source_parts(source)?;
+    let root = std::env::current_dir().ok()?;
+    let text = fs::read_to_string(root.join(relative)).ok()?;
+    anchor_text(&text, symbol.as_deref())
+}
+
+fn audit_source_issue(
+    memory: &crate::model::Memory,
+    full: &Path,
+    symbol: Option<&str>,
+) -> Option<&'static str> {
+    if !full.exists() {
+        return Some("missing_source");
+    }
+    if full.is_dir() {
+        return None;
+    }
+    let text = match fs::read_to_string(full) {
+        Ok(text) => text,
+        Err(_) => return Some("unreadable_source"),
+    };
+    if let Some(symbol) = symbol {
+        if !text.contains(symbol) {
+            return Some("missing_symbol");
+        }
+    }
+    if let Some(expected) = &memory.source_hash {
+        let Some((_, actual)) = anchor_text(&text, symbol) else {
+            return Some("missing_symbol");
+        };
+        if actual != *expected {
+            return Some("source_changed");
+        }
+    }
+    None
+}
+
 fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
+    outln!(
+        "{}",
+        serde_json::to_string(&run_audit(path, &root, apply)?)?
+    );
+    Ok(())
+}
+
+fn run_audit(path: &Path, root: &Path, apply: bool) -> Result<serde_json::Value> {
     let mut store = Store::open(path)?;
     let memories = active_memories(&mut store)?;
     let now = crate::model::now_ms();
@@ -1258,18 +1491,7 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
         };
         checked += 1;
         let full = root.join(&relative);
-        let issue = if !full.exists() {
-            Some("missing_source")
-        } else if let Some(symbol) = symbol.as_deref() {
-            match fs::read_to_string(&full) {
-                Ok(text) if text.contains(symbol) => None,
-                Ok(_) => Some("missing_symbol"),
-                Err(_) => Some("unreadable_source"),
-            }
-        } else {
-            None
-        };
-        let Some(issue) = issue else {
+        let Some(issue) = audit_source_issue(memory, &full, symbol.as_deref()) else {
             continue;
         };
         let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
@@ -1278,6 +1500,7 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
             "source": memory.source,
             "path": full.display().to_string(),
             "issue": issue,
+            "source_line": memory.source_line,
             "age_days": age_days
         }));
     }
@@ -1292,18 +1515,14 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     }
     let total = issues.len();
     issues.truncate(500);
-    outln!(
-        "{}",
-        serde_json::to_string(&json!({
-            "ok": true,
-            "root": root.display().to_string(),
-            "checked": checked,
-            "issues": issues,
-            "issue_count": total,
-            "apply": apply
-        }))?
-    );
-    Ok(())
+    Ok(json!({
+        "ok": true,
+        "root": root.display().to_string(),
+        "checked": checked,
+        "issues": issues,
+        "issue_count": total,
+        "apply": apply
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2170,20 +2389,6 @@ fn run_consolidate(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_consolidate(
-    path: &Path,
-    apply: bool,
-    top: usize,
-    limit: usize,
-    offset: usize,
-    threshold: f64,
-) -> Result<()> {
-    let output = run_consolidate(path, apply, top, limit, offset, threshold)?;
-    outln!("{}", serde_json::to_string(&output)?);
-    Ok(())
-}
-
 fn validate_trust(trust: &str) -> Result<()> {
     if matches!(trust, "authored" | "verified" | "imported" | "inferred") {
         Ok(())
@@ -2217,6 +2422,10 @@ fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
     memory.conflict_of = input.conflict_of.clone();
     memory.trust = trust.to_string();
     memory.source_commit = input.source_commit.clone();
+    if let Some((line, hash)) = source_anchor(&input.source) {
+        memory.source_hash = Some(hash);
+        memory.source_line = (line > 0).then_some(line);
+    }
     Ok(memory)
 }
 

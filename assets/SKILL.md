@@ -42,6 +42,15 @@ Update the same frame at decisions or plan changes with `--status`, `--next`,
 when finished. Keep it short: goal, active constraints, next 1–3 steps, open
 questions, touched paths. Do not paste the frame into memory records.
 
+When several agents may touch the same task, take a lease first:
+
+```bash
+$CM claim --file "$F" --task current --owner <agent-id> --lease 30
+$CM release --file "$F" --task current --owner <agent-id>
+```
+
+`claim` rejects a live lease held by another owner; `finish` clears the lease.
+
 ## Resume
 
 At session start, after context loss, or when handing work to another agent:
@@ -81,6 +90,7 @@ $CM govern --file "$F"
 $CM govern --file "$F" --merge --apply
 $CM audit --file "$F" --root .
 $CM audit --file "$F" --root . --apply
+$CM finish --file "$F" --task current --summary "<outcome>" --root . --apply
 $CM status --file "$F"
 $CM forget --file "$F" --id <id>
 ```
@@ -88,8 +98,9 @@ $CM forget --file "$F" --id <id>
 Mark a memory `useful` only when it materially helped; mark `wrong` or `stale`
 when it misled you. `cm govern` is dry-run by default; `--apply` forgets only
 negative-feedback memories and exact duplicates, and `--merge` folds
-near-duplicates when applying. `cm audit` checks `path:symbol` sources for
-drift; `--apply` records stale feedback for governance. Do not bulk-mark every
-recall result.
+near-duplicates when applying. `cm audit` checks `path:symbol` sources, including
+the source excerpt hash captured at write time; `--apply` records stale feedback
+for drift. `cm finish` marks the frame done, writes the summary as one episode,
+and runs audit plus governance.
 
 `cm.cache` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.

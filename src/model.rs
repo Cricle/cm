@@ -42,6 +42,8 @@ pub(crate) struct Memory {
     pub conflict_of: Option<String>,
     pub trust: String,
     pub source_commit: Option<String>,
+    pub source_hash: Option<String>,
+    pub source_line: Option<u32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -75,6 +77,8 @@ pub(crate) fn new_memory(
         conflict_of: None,
         trust: "authored".to_string(),
         source_commit: None,
+        source_hash: None,
+        source_line: None,
     }
 }
 
@@ -103,6 +107,8 @@ pub(crate) fn build_merged(
     memory.conflict_of = None;
     memory.trust = canonical.trust.clone();
     memory.source_commit = canonical.source_commit.clone();
+    memory.source_hash = canonical.source_hash.clone();
+    memory.source_line = canonical.source_line;
     memory
 }
 
@@ -169,7 +175,7 @@ fn compact_texts<S: AsRef<str>>(id: u8, mask: &mut u32, out: &mut Vec<u8>, value
 }
 
 /// Schema-aware compact payload. Field order is fixed by schema `0xF1`;
-/// a 17-bit presence map removes per-field IDs/types, and defaults are omitted.
+/// a 19-bit presence map removes per-field IDs/types, and defaults are omitted.
 pub(crate) fn memory_payload(memory: &Memory) -> Vec<u8> {
     let mut mask = 0u32;
     let mut body = Vec::new();
@@ -212,6 +218,12 @@ pub(crate) fn memory_payload(memory: &Memory) -> Vec<u8> {
     if let Some(source_commit) = &memory.source_commit {
         compact_text(17, &mut mask, &mut body, source_commit);
     }
+    if let Some(source_hash) = &memory.source_hash {
+        compact_text(18, &mut mask, &mut body, source_hash);
+    }
+    if let Some(source_line) = memory.source_line {
+        compact_u64(19, &mut mask, &mut body, u64::from(source_line));
+    }
     let mut out = Vec::with_capacity(5 + body.len());
     out.push(COMPACT_MARKER);
     out.extend_from_slice(&mask.to_le_bytes());
@@ -252,7 +264,7 @@ fn decode_compact_memory(payload: &[u8]) -> Result<Memory> {
     let mask = u32::from_le_bytes(payload[1..5].try_into().unwrap());
     let mut cursor = 5usize;
     let mut fields: HashMap<u8, Field> = HashMap::new();
-    for id in 1..=17u8 {
+    for id in 1..=19u8 {
         if mask & (1u32 << (id - 1)) == 0 {
             continue;
         }
@@ -266,7 +278,7 @@ fn decode_compact_memory(payload: &[u8]) -> Result<Memory> {
                 Field::F64(value)
             }
             8 | 14 => Field::Texts(take_compact_texts(payload, &mut cursor)?),
-            9 | 12 | 13 => Field::U64(take_compact_u64(payload, &mut cursor)?),
+            9 | 12 | 13 | 19 => Field::U64(take_compact_u64(payload, &mut cursor)?),
             _ => Field::Text(take_compact_text(payload, &mut cursor)?),
         };
         fields.insert(id, field);
@@ -305,6 +317,8 @@ fn decode_compact_memory(payload: &[u8]) -> Result<Memory> {
         conflict_of: get_text(&fields, 15).map(ToString::to_string),
         trust: get_text(&fields, 16).unwrap_or("authored").to_string(),
         source_commit: get_text(&fields, 17).map(ToString::to_string),
+        source_hash: get_text(&fields, 18).map(ToString::to_string),
+        source_line: get_u64(&fields, 19).map(|line| line as u32),
     })
 }
 
@@ -344,6 +358,8 @@ pub(crate) fn decode_memory(payload: &[u8]) -> Result<Memory> {
         conflict_of: get_text(&fields, 15).map(ToString::to_string),
         trust: get_text(&fields, 16).unwrap_or("authored").to_string(),
         source_commit: get_text(&fields, 17).map(ToString::to_string),
+        source_hash: get_text(&fields, 18).map(ToString::to_string),
+        source_line: get_u64(&fields, 19).map(|line| line as u32),
     })
 }
 

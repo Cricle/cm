@@ -102,6 +102,8 @@ mod model_tests {
         memory.conflict_of = Some("conflict-id".to_string());
         memory.trust = "verified".to_string();
         memory.source_commit = Some("abc123".to_string());
+        memory.source_hash = Some("0123456789abcdef".to_string());
+        memory.source_line = Some(42);
 
         let encoded = memory_payload(&memory);
         let decoded = decode_memory(&encoded).expect("decode");
@@ -112,6 +114,8 @@ mod model_tests {
         assert_eq!(decoded.conflict_of.as_deref(), Some("conflict-id"));
         assert_eq!(decoded.trust, "verified");
         assert_eq!(decoded.source_commit.as_deref(), Some("abc123"));
+        assert_eq!(decoded.source_hash.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(decoded.source_line, Some(42));
     }
 
     #[test]

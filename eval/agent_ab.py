@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Long-task A/B harness for cm.
+
+Each task is a small workspace plus a verifier. The harness runs an external
+agent command twice: once with a seeded cm store and a memory-first prompt,
+once without cm. Success is decided by the task verifier, not by the agent's
+self-report.
+
+Agent command contract
+----------------------
+`--agent-cmd` is a shell command template. It is formatted with:
+
+  {cm}         path to the cm binary
+  {workspace}  fresh workspace for this run
+  {memory}     cm file path (empty string in the without-cm run)
+  {prompt}     prompt file path
+
+The agent also receives these environment variables:
+
+  CM_TASK_ID, CM_WORKSPACE, CM_MEMORY, CM_PROMPT, CM_PROMPT_FILE, CM_MODE
+
+For token/turn accounting, the agent may write:
+
+  {"tokens": 1234, "turns": 8, "tool_calls": 12, "files_read": 3}
+
+to `CM_USAGE_FILE` (JSON). Missing fields stay null.
+
+Examples
+--------
+  python eval/agent_ab.py --cm target/release/cm.exe \
+    --agent-cmd "my-agent --prompt {prompt} --cwd {workspace}"
+
+  python eval/agent_ab.py --agent-cmd "python my_agent.py" --runs 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def find_cm(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    if os.environ.get("CM"):
+        return os.environ["CM"]
+    root = Path(__file__).resolve().parents[1]
+    for candidate in (
+        root / "target" / "release" / "cm.exe",
+        root / "target" / "release" / "cm",
+        root / "target" / "debug" / "cm.exe",
+        root / "target" / "debug" / "cm",
+        root / "cm.exe",
+        root / "cm",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("cm")
+    if found:
+        return found
+    raise SystemExit("cm binary not found; pass --cm or set CM")
+
+
+def run(cmd: list[str], cwd: Path, stdin_path: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
+    stdin = stdin_path.open("rb") if stdin_path else None
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    finally:
+        if stdin:
+            stdin.close()
+
+
+def must_run(cmd: list[str], cwd: Path, stdin_path: Path | None = None, timeout: int = 300) -> str:
+    result = run(cmd, cwd, stdin_path, timeout)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(cmd)}\n"
+            f"{result.stderr.decode('utf-8', 'replace')}"
+        )
+    return result.stdout.decode("utf-8", "replace")
+
+
+def load_tasks(eval_dir: Path, selected: list[str] | None) -> list[dict]:
+    tasks = []
+    for path in sorted((eval_dir / "tasks").glob("*/task.json")):
+        task = json.loads(path.read_text(encoding="utf-8"))
+        task["_dir"] = path.parent
+        if selected and task["id"] not in selected:
+            continue
+        tasks.append(task)
+    if not tasks:
+        raise SystemExit("no tasks found")
+    return tasks
+
+
+def seed_memory(cm: str, task: dict, workspace: Path) -> str:
+    memory = workspace / "cm"
+    must_run([cm, "init", "--file", str(memory), "--empty"], workspace)
+    memory_jsonl = task["_dir"] / "memory.jsonl"
+    if memory_jsonl.exists():
+        must_run([cm, "import", "--file", str(memory)], workspace, memory_jsonl)
+    cmd = [cm, "frame", "set", "--file", str(memory), "--task", task["id"], "--goal", task["goal"]]
+    for step in task.get("next", []):
+        cmd += ["--next", step]
+    for constraint in task.get("constraints", []):
+        cmd += ["--constraint", constraint]
+    must_run(cmd, workspace)
+    return str(memory)
+
+
+def task_prompt(cm: str, task: dict, mode: str, memory: str) -> str:
+    if mode == "without-cm":
+        return task["prompt"].strip() + "\n"
+    return (
+        "You are working in a repository with a cm memory sidecar.\n"
+        f"cm binary: {cm}\n"
+        f"memory file: {memory}\n\n"
+        "Start by running this once, then follow its next steps and cited sources:\n"
+        f"  {cm} brief --file {memory} --task current --budget 1200\n\n"
+        "Use `cm recall --file ... --task current --query ...` before opening files. "
+        "After a decision, write one `cm remember` record with `--source path:symbol`. "
+        "Do not write progress logs or transcripts.\n\n"
+        "Task:\n"
+        f"{task['prompt'].strip()}\n"
+    )
+
+
+def copy_task_workspace(task: dict, dest: Path) -> None:
+    source = task["_dir"] / "workspace"
+    shutil.copytree(source, dest, dirs_exist_ok=True)
+
+
+def verify_task(task: dict, workspace: Path, timeout: int) -> bool:
+    cmd = [sys.executable, str(task["_dir"] / "verify.py"), str(workspace)]
+    result = run(cmd, workspace, timeout=timeout)
+    return result.returncode == 0
+
+
+def read_usage(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def run_one(cm: str, task: dict, mode: str, run_idx: int, args: argparse.Namespace) -> dict:
+    workspace = Path(tempfile.mkdtemp(prefix=f"cm-agent-{task['id']}-{mode}-"))
+    try:
+        copy_task_workspace(task, workspace)
+        memory = seed_memory(cm, task, workspace) if mode == "with-cm" else ""
+        prompt = task_prompt(cm, task, mode, memory)
+        prompt_file = workspace / ".cm-task-prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        usage_file = workspace / ".cm-usage.json"
+        env = dict(os.environ)
+        env.update(
+            {
+                "CM_TASK_ID": task["id"],
+                "CM_WORKSPACE": str(workspace),
+                "CM_MEMORY": memory,
+                "CM_PROMPT": prompt,
+                "CM_PROMPT_FILE": str(prompt_file),
+                "CM_USAGE_FILE": str(usage_file),
+                "CM_MODE": mode,
+                "CM_BIN": cm,
+            }
+        )
+        command = args.agent_cmd.format(
+            cm=cm, workspace=workspace, memory=memory, prompt=prompt_file
+        )
+        started = time.perf_counter()
+        agent = subprocess.run(
+            command,
+            cwd=workspace,
+            env=env,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=args.timeout,
+            check=False,
+        )
+        elapsed = time.perf_counter() - started
+        success = verify_task(task, workspace, args.timeout)
+        usage = read_usage(usage_file)
+        row = {
+            "task": task["id"],
+            "mode": mode,
+            "run": run_idx,
+            "success": success,
+            "agent_exit": agent.returncode,
+            "seconds": round(elapsed, 3),
+            "tokens": usage.get("tokens"),
+            "turns": usage.get("turns"),
+            "tool_calls": usage.get("tool_calls"),
+            "files_read": usage.get("files_read"),
+            "workspace": str(workspace) if args.keep else None,
+            "stdout_tail": agent.stdout.decode("utf-8", "replace")[-1000:] if args.verbose else None,
+            "stderr_tail": agent.stderr.decode("utf-8", "replace")[-1000:] if args.verbose else None,
+        }
+        return row
+    finally:
+        if not args.keep:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+
+def summarize(rows: list[dict]) -> dict:
+    summary = {}
+    for mode in ("with-cm", "without-cm"):
+        selected = [row for row in rows if row["mode"] == mode]
+        if not selected:
+            continue
+        tokens = [row["tokens"] for row in selected if isinstance(row["tokens"], (int, float))]
+        turns = [row["turns"] for row in selected if isinstance(row["turns"], (int, float))]
+        files = [row["files_read"] for row in selected if isinstance(row["files_read"], (int, float))]
+        summary[mode] = {
+            "runs": len(selected),
+            "success_rate": round(sum(1 for row in selected if row["success"]) / len(selected), 3),
+            "median_seconds": round(statistics.median(row["seconds"] for row in selected), 3),
+            "median_tokens": round(statistics.median(tokens), 1) if tokens else None,
+            "median_turns": round(statistics.median(turns), 1) if turns else None,
+            "median_files_read": round(statistics.median(files), 1) if files else None,
+        }
+    return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cm", help="path to the cm binary")
+    parser.add_argument("--agent-cmd", default=os.environ.get("CM_AGENT_CMD"), help="agent command template")
+    parser.add_argument("--tasks", nargs="*", help="task ids to run")
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--mode", choices=["both", "with-cm", "without-cm"], default="both")
+    parser.add_argument("--keep", action="store_true", help="keep run workspaces")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--json-out", type=Path)
+    args = parser.parse_args()
+    if not args.agent_cmd:
+        raise SystemExit("pass --agent-cmd (or set CM_AGENT_CMD)")
+
+    cm = find_cm(args.cm)
+    eval_dir = Path(__file__).resolve().parent
+    tasks = load_tasks(eval_dir, args.tasks)
+    modes = ["with-cm", "without-cm"] if args.mode == "both" else [args.mode]
+    rows = []
+    for task in tasks:
+        for mode in modes:
+            for run_idx in range(1, args.runs + 1):
+                print(f"[{task['id']}] {mode} run {run_idx}", file=sys.stderr)
+                rows.append(run_one(cm, task, mode, run_idx, args))
+    report = {"cm": cm, "tasks": [task["id"] for task in tasks], "rows": rows, "summary": summarize(rows)}
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if args.json_out:
+        args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

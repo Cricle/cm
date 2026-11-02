@@ -255,6 +255,165 @@ fn audit_detects_source_drift_and_feeds_governance() {
 }
 
 #[test]
+fn audit_detects_source_hash_drift() {
+    let dir = temp_dir("anchor");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    let source = dir.join("src").join("foo.rs");
+    fs::write(&source, "pub fn hello() {\n    println!(\"hi\");\n}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello",
+            "--text",
+            "hello prints hi",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
+    let root_arg = dir.to_str().unwrap();
+    let clean = run(&dir, &["audit", "--file", file_arg, "--root", root_arg]);
+    assert_ok(&clean);
+    let report: serde_json::Value = serde_json::from_slice(&clean.stdout).expect("audit json");
+    assert_eq!(report["issue_count"], 0);
+
+    fs::write(&source, "pub fn hello() {\n    println!(\"bye\");\n}\n").expect("edit source");
+    let dirty = run(&dir, &["audit", "--file", file_arg, "--root", root_arg]);
+    assert_ok(&dirty);
+    let report: serde_json::Value = serde_json::from_slice(&dirty.stdout).expect("audit json");
+    assert_eq!(report["issue_count"], 1);
+    assert_eq!(report["issues"][0]["issue"], "source_changed");
+    assert_eq!(report["issues"][0]["source_line"], 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn claim_and_release_guard_a_task_frame() {
+    let dir = temp_dir("claim");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame", "set", "--file", file_arg, "--task", "T1", "--goal", "Ship it",
+        ],
+    ));
+    let first = run(
+        &dir,
+        &[
+            "claim", "--file", file_arg, "--task", "T1", "--owner", "agent-a", "--lease", "30",
+        ],
+    );
+    assert_ok(&first);
+    let blocked = run(
+        &dir,
+        &[
+            "claim", "--file", file_arg, "--task", "T1", "--owner", "agent-b", "--lease", "30",
+        ],
+    );
+    assert!(!blocked.status.success(), "second owner must be rejected");
+    let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&get);
+    let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("frame json");
+    assert_eq!(frame["owner"], "agent-a");
+    assert!(frame["lease_until"].as_u64().unwrap() > 0);
+
+    assert_ok(&run(
+        &dir,
+        &[
+            "release", "--file", file_arg, "--task", "T1", "--owner", "agent-a",
+        ],
+    ));
+    let second = run(
+        &dir,
+        &[
+            "claim", "--file", file_arg, "--task", "T1", "--owner", "agent-b", "--lease", "30",
+        ],
+    );
+    assert_ok(&second);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn finish_closes_frame_writes_summary_and_governs() {
+    let dir = temp_dir("finish");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(dir.join("src").join("lib.rs"), "pub fn done() {}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Finish the task",
+            "--next",
+            "write summary",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "done function",
+            "--text",
+            "The done function marks completion",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:done",
+        ],
+    ));
+    let root_arg = dir.to_str().unwrap();
+    let finish = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--summary",
+            "Delivered the task",
+            "--root",
+            root_arg,
+            "--apply",
+        ],
+    );
+    assert_ok(&finish);
+    let report: serde_json::Value = serde_json::from_slice(&finish.stdout).expect("finish json");
+    assert_eq!(report["status"], "done");
+    assert!(report["summary_id"].as_str().is_some());
+    assert_eq!(report["audit"]["issue_count"], 0);
+    assert_eq!(report["govern"]["ok"], true);
+
+    let get = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&get);
+    let frame: serde_json::Value = serde_json::from_slice(&get.stdout).expect("frame json");
+    assert_eq!(frame["status"], "done");
+    assert!(frame["owner"].is_null());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn governance_merges_near_duplicates() {
     let dir = temp_dir("merge");
     let file = dir.join("cm");

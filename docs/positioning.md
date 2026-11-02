@@ -33,7 +33,9 @@ next steps, open questions, and touched paths for the current work item. It is
 stored as a normal memory record (`kind=frame`), superseded on update, and kept
 separate from project facts. `cm brief` composes the active frame with a
 budgeted task working set so a new session or another agent can resume without
-re-reading the repository.
+re-reading the repository. A frame can carry an owner lease (`claim`/`release`)
+so concurrent agents do not duplicate the same task; `cm finish` marks it done,
+writes one episode summary, and runs audit plus governance.
 
 ## Memory shape
 
@@ -69,12 +71,13 @@ Not input:
 Required gates:
 
 1. every page has a source path/symbol and `source_commit`;
-2. one topic per page, 2–4 related claims; split only when claims answer
+2. source anchors store a context hash so `cm audit` can detect later drift;
+3. one topic per page, 2–4 related claims; split only when claims answer
    different queries;
-3. independent verifier checks the claims against source;
-4. source anchors are repaired, not silently dropped;
-5. exact/near duplicates removed;
-6. `cm conflicts` and `cm doctor --strict` pass before publishing.
+4. independent verifier checks the claims against source;
+5. source anchors are repaired, not silently dropped;
+6. exact/near duplicates removed;
+7. `cm conflicts` and `cm doctor --strict` pass before publishing.
 
 ## Quality bar
 

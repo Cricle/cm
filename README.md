@@ -57,6 +57,9 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200]
+cm claim --file cm --task <task>|current --owner <id> [--lease 30]
+cm release --file cm --task <task>|current [--owner <id>]
+cm finish --file cm [--task <task>|current] [--summary <text>] [--root <dir>] [--apply]
 cm forget --file cm --id <id>
 cm status [--file cm]
 cm cache-stats [--file cm]
@@ -80,6 +83,11 @@ relevant memories in one JSON object, and tags the cache working set with that
 task. Use an explicit task id when several tasks are active. If no frame exists,
 pass `--query` to get a plain budgeted brief.
 
+`claim --owner <id>` takes a lease on a task frame; a second agent is rejected
+while the lease is live. `release` clears it, and `finish` clears it together
+with marking the frame done. `finish --summary ... --root <repo> --apply` also
+writes one episode summary and runs audit plus governance in the same command.
+
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
 ID with `"duplicate": true` instead of appending. Use `--force` for a deliberate
@@ -93,11 +101,13 @@ next steps, open questions, and touched paths as a normal memory record; updates
 supersede the previous frame. `feedback` records useful/stale/wrong signals;
 `govern` turns them into verify/forget suggestions, auto-forgets exact
 duplicates with `--apply`, and folds near-duplicates when `--merge` is set.
-`audit --root <repo>` checks that each `path:symbol` source still exists and
-contains the symbol; `--apply` records stale feedback for drift, which `govern`
-then surfaces. Source paths are part of the BM25 token stream, so file/symbol
-queries work without embeddings. Read commands may create or update the
-disposable `cm.cache` cache; `cm` remains unchanged.
+`audit --root <repo>` checks that each `path:symbol` source still exists, that
+the symbol is present, and that the source excerpt hash captured at write time
+still matches. `--apply` records stale feedback for `missing_source`,
+`missing_symbol`, or `source_changed` drift, which `govern` then surfaces.
+Source paths are part of the BM25 token stream, so file/symbol queries work
+without embeddings. Read commands may create or update the disposable
+`cm.cache` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -115,6 +125,9 @@ cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--nex
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm brief --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust authored] [--query <text>]
+cm claim --file cm --task <id>|current --owner <id> [--lease 30]
+cm release --file cm --task <id>|current [--owner <id>]
+cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
 cm audit --root <repo> [--apply] [--file cm]
@@ -122,7 +135,6 @@ cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
-cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]
 cm forget --file cm --id <id>
 cm purge --file cm
 cm conflicts --file cm
