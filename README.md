@@ -56,7 +56,7 @@ remains the project-local installation path.
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
-cm brief --file cm [--task <task>|current] [--budget 1200]
+cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt]
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
 cm release --file cm --task <task>|current [--owner <id>]
 cm finish --file cm [--task <task>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -81,7 +81,9 @@ When `--query` is omitted, `recall` uses the task frame's goal and next steps.
 most recently updated active frame, emits the frame plus a budgeted set of
 relevant memories in one JSON object, and tags the cache working set with that
 task. Use an explicit task id when several tasks are active. If no frame exists,
-pass `--query` to get a plain budgeted brief.
+pass `--query` to get a plain budgeted brief. `--format prompt` emits a compact
+text block intended to be injected into the model prompt before the first tool
+call, eliminating the brief tool turn entirely.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
@@ -126,7 +128,7 @@ cm cache-stats [--file cm]
 cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--next <text>]... [--open <text>]... [--touch <path>]...
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
-cm brief --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
+cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]

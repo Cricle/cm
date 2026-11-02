@@ -478,7 +478,7 @@ fn print_usage() {
          cm frame set --task <id> --goal <text> [--next <text>] [--open <text>]
          cm frame get --task <id>
          cm frame list
-         cm brief [--task <id>|current] [--budget 1200]
+         cm brief [--task <id>|current] [--budget 1200] [--format json|prompt]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -1869,6 +1869,7 @@ fn select_context(
 
 fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     let budget = arg_usize(args, "--budget", 1200);
+    let format = arg_value(args, "--format").unwrap_or_else(|| "json".to_string());
     let task_arg = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
     let explicit_query = arg_value(args, "--query");
     let mut store = Store::open(path)?;
@@ -1913,17 +1914,87 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         memories.pop();
         memory_tokens = json_tokens(&memories)?;
     }
-    outln!(
-        "{}",
-        serde_json::to_string(&BriefOut {
-            frame,
-            query,
-            budget,
-            estimated_tokens: frame_tokens + memory_tokens,
-            memories,
-        })?
-    );
+    match format.as_str() {
+        "json" => outln!(
+            "{}",
+            serde_json::to_string(&BriefOut {
+                frame,
+                query,
+                budget,
+                estimated_tokens: frame_tokens + memory_tokens,
+                memories,
+            })?
+        ),
+        "prompt" | "text" => outln!("{}", brief_prompt(&frame, &query, &memories)),
+        other => bail!("invalid brief format {other:?}; expected json or prompt"),
+    }
     Ok(())
+}
+
+fn push_prompt_list(out: &mut String, label: &str, value: Option<&serde_json::Value>) {
+    let Some(items) = value.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(label);
+    out.push('\n');
+    for item in items {
+        if let Some(item) = item.as_str() {
+            out.push_str("- ");
+            out.push_str(item);
+            out.push('\n');
+        }
+    }
+}
+
+fn brief_prompt(
+    frame: &Option<serde_json::Value>,
+    query: &str,
+    memories: &[BriefMemory],
+) -> String {
+    let mut out = String::new();
+    if let Some(frame) = frame {
+        out.push_str("TASK: ");
+        out.push_str(frame["task"].as_str().unwrap_or(""));
+        out.push('\n');
+        out.push_str("STATUS: ");
+        out.push_str(frame["status"].as_str().unwrap_or(""));
+        out.push('\n');
+        out.push_str("GOAL: ");
+        out.push_str(frame["goal"].as_str().unwrap_or(""));
+        out.push('\n');
+        push_prompt_list(&mut out, "CONSTRAINTS:", frame.get("constraints"));
+        push_prompt_list(&mut out, "NEXT:", frame.get("next"));
+        push_prompt_list(&mut out, "OPEN:", frame.get("open"));
+        push_prompt_list(&mut out, "TOUCHES:", frame.get("touches"));
+    }
+    out.push_str("QUERY: ");
+    out.push_str(query);
+    out.push_str("\n\n");
+    for memory in memories {
+        out.push('[');
+        out.push_str(&memory.id);
+        out.push_str("] ");
+        out.push_str(&memory.kind);
+        out.push(' ');
+        out.push_str(&memory.subject);
+        out.push('\n');
+        out.push_str(&memory.text);
+        out.push('\n');
+        if !memory.source.is_empty() {
+            out.push_str("source: ");
+            out.push_str(&memory.source);
+            if let Some(line) = memory.source_line {
+                out.push(':');
+                out.push_str(&line.to_string());
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {

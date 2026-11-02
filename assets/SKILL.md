@@ -70,10 +70,13 @@ At session start, after context loss, or when handing work to another agent:
 $CM brief --file "$F" --task current --budget 1200
 ```
 
-`current` resolves to the latest active frame. The result is one JSON object
-with the frame and a budgeted set of relevant memories, so prefer it over
-separate `frame get` + `recall` calls. Pass an explicit task id when several
-tasks are active; pass `--query` when no frame exists.
+If the runner can build the model prompt before the first tool call, run
+`cm brief --format prompt` outside the model and prepend its stdout to the task;
+that removes the brief tool turn entirely. `current` resolves to the latest
+active frame. The result contains the frame and a budgeted set of relevant
+memories, so prefer it over separate `frame get` + `recall` calls. Pass an
+explicit task id when several tasks are active; pass `--query` when no frame
+exists.
 
 ## Write
 

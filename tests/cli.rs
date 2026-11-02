@@ -750,6 +750,20 @@ fn brief_resumes_current_frame_with_budgeted_context() {
         brief["estimated_tokens"].as_u64().unwrap() <= 300,
         "brief must respect its budget: {brief}"
     );
+    let prompt = run(
+        &dir,
+        &[
+            "brief", "--file", file_arg, "--task", "current", "--budget", "300", "--format",
+            "prompt",
+        ],
+    );
+    assert_ok(&prompt);
+    let prompt = String::from_utf8_lossy(&prompt.stdout);
+    assert!(prompt.contains("GOAL: Fix parser recovery"), "{prompt}");
+    assert!(
+        prompt.contains("source: src/parser.rs:parse_stmt"),
+        "{prompt}"
+    );
 
     let fallback = run(
         &dir,

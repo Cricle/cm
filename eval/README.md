@@ -56,6 +56,10 @@ Task fixtures live in `eval/tasks/<id>/`: `task.json`, `workspace/`,
 sessions; the verifier runs once after the last session. `scripted_fixture_agent.py`
 only smoke-tests the harness plumbing; do not report its numbers as model results.
 
+For production runners that build the model prompt before the first tool call,
+use `cm brief --format prompt` and prepend its stdout to the task. That removes
+the brief tool turn entirely; the harness still measures the tool-call path.
+
 ### Measured short-task A/B
 
 Three one-session tasks, one run each, using the same model and verifier:
