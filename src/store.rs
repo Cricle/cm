@@ -1334,7 +1334,10 @@ impl TailView {
             .map(|memory| {
                 (
                     memory.clone(),
-                    tokenize(&format!("{} {}", memory.subject, memory.text)),
+                    tokenize(&format!(
+                        "{} {} {}",
+                        memory.subject, memory.text, memory.source
+                    )),
                 )
             })
             .collect();
@@ -2162,7 +2165,10 @@ fn build_index_bytes(mut docs: Vec<IndexDoc>) -> Result<Vec<u8>> {
         });
         doc.kind_id = kind_id(&doc.memory.kind).unwrap_or(0);
         let mut tf: HashMap<String, u32> = HashMap::new();
-        for token in tokenize(&format!("{} {}", doc.memory.subject, doc.memory.text)) {
+        for token in tokenize(&format!(
+            "{} {} {}",
+            doc.memory.subject, doc.memory.text, doc.memory.source
+        )) {
             *tf.entry(token).or_default() += 1;
         }
         doc.token_count = tf.values().sum::<u32>();

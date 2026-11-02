@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::model::{
-    build_merged, cmx_line, estimate_tokens, kind_id, memory_payload, memory_snippet,
+    build_merged, cmx_line, content_hash, estimate_tokens, kind_id, memory_payload, memory_snippet,
     minhash_signature, minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu,
     KINDS,
 };
@@ -433,7 +433,7 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm feedback --id <id> [--signal useful|stale|wrong]
-         cm govern [--apply] [--stale-days 90]
+         cm govern [--apply] [--merge] [--stale-days 90]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -1005,8 +1005,23 @@ struct FeedbackStats {
 
 fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
     let apply = has_flag(args, "--apply");
+    let merge = has_flag(args, "--merge");
     let stale_days = arg_usize(args, "--stale-days", 90) as u64;
     let wrong_threshold = arg_usize(args, "--wrong-threshold", 2).max(1) as u32;
+    let merge_threshold = arg_f64(args, "--merge-threshold", 0.85);
+    let merged_groups = if merge {
+        if apply {
+            // Consolidation walks the index; fold tail records in first so a
+            // governance pass also sees decisions written since the last
+            // reindex.
+            reindex_file(path)?;
+        }
+        run_consolidate(path, apply, 8, 5000, 0, merge_threshold)?
+            .groups
+            .len()
+    } else {
+        0
+    };
     let mut store = Store::open(path)?;
     let memories = active_memories(&mut store)?;
     let mut feedback: HashMap<String, FeedbackStats> = HashMap::new();
@@ -1027,6 +1042,40 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
         stats.last = stats.last.max(item.updated_at);
     }
     let now = crate::model::now_ms();
+    let mut duplicate_targets: HashMap<String, String> = HashMap::new();
+    let mut by_content: HashMap<(String, String, String, String), Vec<&crate::model::Memory>> =
+        HashMap::new();
+    for memory in &memories {
+        if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
+            continue;
+        }
+        by_content
+            .entry((
+                memory.scope.clone(),
+                memory.kind.clone(),
+                memory.subject.clone(),
+                content_hash(memory),
+            ))
+            .or_default()
+            .push(memory);
+    }
+    for mut group in by_content.into_values() {
+        if group.len() < 2 {
+            continue;
+        }
+        group.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for duplicate in &group[1..] {
+            duplicate_targets.insert(
+                duplicate.id.clone(),
+                format!("exact duplicate of {}", group[0].id),
+            );
+        }
+    }
+    let conflicts = conflict_groups(memories.clone());
     let mut suggestions = Vec::new();
     for memory in &memories {
         if matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND) {
@@ -1038,7 +1087,9 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
         let wrong = stats.map_or(0, |s| s.wrong);
         let age_days = now.saturating_sub(memory.created_at) / 86_400_000;
         let score = i64::from(useful) * 2 - i64::from(stale) - i64::from(wrong) * 3;
-        let (action, reason) = if wrong >= wrong_threshold || score <= -3 {
+        let (action, reason) = if let Some(reason) = duplicate_targets.get(&memory.id) {
+            ("forget", reason.as_str())
+        } else if wrong >= wrong_threshold || score <= -3 {
             ("forget", "negative feedback")
         } else if stale >= 2 || (age_days >= stale_days && useful == 0) {
             ("verify", "stale or unverified")
@@ -1071,8 +1122,10 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
         for suggestion in &suggestions {
             if suggestion["action"] == "forget" {
                 if let Some(id) = suggestion["id"].as_str() {
-                    cmd_forget(path, id)?;
-                    forgotten.push(id.to_string());
+                    if !forgotten.iter().any(|value| value == id) {
+                        cmd_forget(path, id)?;
+                        forgotten.push(id.to_string());
+                    }
                 }
             }
         }
@@ -1082,6 +1135,8 @@ fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
         serde_json::to_string(&json!({
             "ok": true,
             "apply": apply,
+            "conflicts": conflicts.len(),
+            "merged_groups": merged_groups,
             "suggestions": suggestions,
             "forgotten": forgotten
         }))?
@@ -1733,14 +1788,14 @@ pub(crate) fn cmd_verify(path: &Path, full: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_consolidate(
+fn run_consolidate(
     path: &Path,
     apply: bool,
     top: usize,
     limit: usize,
     offset: usize,
     threshold: f64,
-) -> Result<()> {
+) -> Result<ConsolidateOut> {
     let mut store = Store::open(path)?;
     let tail = store.tail_view()?;
     let doc_count = store.doc_count();
@@ -1759,7 +1814,10 @@ fn cmd_consolidate(
         }
         let meta = store.doc_meta(idx)?;
         let memory = store.doc_memory(&meta)?;
-        if !tail.hidden.contains(&memory.id) {
+        if !tail.hidden.contains(&memory.id)
+            && memory.kind != FRAME_KIND
+            && memory.kind != FEEDBACK_KIND
+        {
             memories.push((idx, memory));
         }
     }
@@ -1857,13 +1915,23 @@ fn cmd_consolidate(
             append_record(path, 3, &memory_payload(merged), false)?;
         }
     }
-    outln!(
-        "{}",
-        serde_json::to_string(&ConsolidateOut {
-            groups: output,
-            applied: apply
-        })?
-    );
+    Ok(ConsolidateOut {
+        groups: output,
+        applied: apply,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_consolidate(
+    path: &Path,
+    apply: bool,
+    top: usize,
+    limit: usize,
+    offset: usize,
+    threshold: f64,
+) -> Result<()> {
+    let output = run_consolidate(path, apply, top, limit, offset, threshold)?;
+    outln!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 

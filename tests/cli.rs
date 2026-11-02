@@ -166,6 +166,98 @@ fn task_flag_is_accepted_and_tags_the_cache_working_set() {
 }
 
 #[test]
+fn governance_removes_exact_duplicates_and_search_matches_sources() {
+    let dir = temp_dir("duplicates");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let record = r#"{"kind":"fact","scope":"repo","subject":"parser","text":"same body","source":"src/parser.rs","confidence":0.9,"trust":"authored"}"#;
+    assert_ok(&run(
+        &dir,
+        &["append", "--file", file_arg, "--json", record],
+    ));
+    assert_ok(&run(
+        &dir,
+        &["append", "--file", file_arg, "--json", record],
+    ));
+    let search = run(
+        &dir,
+        &[
+            "search",
+            "--file",
+            file_arg,
+            "--query",
+            "parser.rs",
+            "--top",
+            "5",
+            "--scope",
+            "repo",
+        ],
+    );
+    assert_ok(&search);
+    let hits: serde_json::Value = serde_json::from_slice(&search.stdout).expect("search json");
+    assert!(!hits["candidates"].as_array().unwrap().is_empty());
+    let govern = run(&dir, &["govern", "--file", file_arg]);
+    assert_ok(&govern);
+    let report: serde_json::Value = serde_json::from_slice(&govern.stdout).expect("govern json");
+    assert_eq!(report["suggestions"][0]["action"], "forget");
+    assert_ok(&run(&dir, &["govern", "--file", file_arg, "--apply"]));
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    assert_eq!(String::from_utf8_lossy(&scan.stdout).lines().count(), 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn governance_merges_near_duplicates() {
+    let dir = temp_dir("merge");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    for text in [
+        "Cache policy uses LRU and frequency for blocks",
+        "Cache policy uses LRU plus frequency for blocks",
+    ] {
+        assert_ok(&run(
+            &dir,
+            &[
+                "remember",
+                "--file",
+                file_arg,
+                "--subject",
+                "cache policy",
+                "--text",
+                text,
+                "--scope",
+                "repo",
+                "--source",
+                "src/cache.rs",
+            ],
+        ));
+    }
+    assert_ok(&run(&dir, &["reindex", "--file", file_arg]));
+    let govern = run(
+        &dir,
+        &[
+            "govern",
+            "--file",
+            file_arg,
+            "--merge",
+            "--merge-threshold",
+            "0.5",
+            "--apply",
+        ],
+    );
+    assert_ok(&govern);
+    let report: serde_json::Value = serde_json::from_slice(&govern.stdout).expect("govern json");
+    assert_eq!(report["merged_groups"], 1);
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    assert_eq!(String::from_utf8_lossy(&scan.stdout).lines().count(), 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn feedback_governs_negative_memories() {
     let dir = temp_dir("govern");
     let file = dir.join("cm");

@@ -84,9 +84,11 @@ problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,
 and evictions. `frame` stores the current task's goal, status, constraints,
 next steps, open questions, and touched paths as a normal memory record; updates
 supersede the previous frame. `feedback` records useful/stale/wrong signals;
-`govern` turns them into verify/forget suggestions and only applies forgets with
-`--apply`. Read commands may create or update the disposable `cm.cache` cache;
-`cm` remains unchanged.
+`govern` turns them into verify/forget suggestions, auto-forgets exact
+duplicates with `--apply`, and folds near-duplicates when `--merge` is set.
+Source paths are part of the BM25 token stream, so file/symbol queries work
+without embeddings. Read commands may create or update the disposable
+`cm.cache` cache; `cm` remains unchanged.
 
 ## Advanced commands
 
@@ -104,7 +106,7 @@ cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--nex
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
-cm govern [--apply] [--stale-days 90] [--wrong-threshold 2] [--file cm]
+cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
@@ -272,6 +274,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release
 ```
+
+See [agent evaluation](docs/agent-eval.md) for the read-only A/B protocol and
+long-task loop.
 
 ## License
 
