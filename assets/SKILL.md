@@ -105,7 +105,7 @@ When many raw notes or long exploration results must become durable memory, use
 the external-model loop:
 
 ```bash
-$CM pack --file "$F" --task current --budget 1200 > pack.prompt
+$CM pack --file "$F" --task current --budget 1200 --snippets 12 --root . > pack.prompt
 # send pack.prompt to the model, save strict JSONL as result.jsonl
 $CM absorb --file "$F" --input result.jsonl --dry-run
 $CM absorb --file "$F" --input result.jsonl

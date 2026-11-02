@@ -275,6 +275,8 @@ struct PackMemory {
     subject: String,
     text: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
 }
 
 impl From<&crate::model::Memory> for PackMemory {
@@ -286,6 +288,7 @@ impl From<&crate::model::Memory> for PackMemory {
             subject: memory.subject.clone(),
             text: memory.text.clone(),
             source: memory.source.clone(),
+            snippet: None,
         }
     }
 }
@@ -542,7 +545,7 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
-         cm pack [--task <id>|current] [--budget 1200] > pack.prompt
+         cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
          cm absorb --input result.jsonl [--dry-run]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
@@ -2347,6 +2350,8 @@ fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {
 
 fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
     let budget = arg_usize(args, "--budget", 1200);
+    let snippet_lines = arg_usize(args, "--snippets", 0);
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let task_arg = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
     let explicit_query = arg_value(args, "--query");
     let mut store = Store::open(path)?;
@@ -2391,6 +2396,16 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
             .get(&memory.id)
             .is_none_or(|stats| !(stats.wrong >= 2 || (stats.stale >= 2 && stats.useful == 0)))
     });
+    let memories: Vec<PackMemory> = selected
+        .iter()
+        .map(|memory| {
+            let mut pack = PackMemory::from(memory);
+            if snippet_lines > 0 {
+                pack.snippet = source_snippet(memory, &root, snippet_lines);
+            }
+            pack
+        })
+        .collect();
     outln!("You are compressing cm memory context for a coding agent.");
     outln!("Return only JSONL, one object per line. No markdown, no prose.");
     outln!("Use the supplied memories as evidence. Do not invent sources.");
@@ -2403,8 +2418,8 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
         outln!("{}", serde_json::to_string(frame)?);
     }
     outln!("MEMORIES");
-    for memory in &selected {
-        outln!("{}", serde_json::to_string(&PackMemory::from(memory))?);
+    for memory in &memories {
+        outln!("{}", serde_json::to_string(memory)?);
     }
     outln!("");
     outln!("OUTPUT");

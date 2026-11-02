@@ -57,7 +57,7 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
-cm pack --file cm [--task <task>|current] [--budget 1200] > pack.prompt
+cm pack --file cm [--task <task>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
 cm absorb --file cm --input result.jsonl
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
 cm release --file cm --task <task>|current [--owner <id>]
@@ -146,7 +146,7 @@ cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--nex
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
-cm pack --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 8] [--query <text>]
+cm pack --file cm [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 8] [--query <text>]
 cm absorb --file cm --input result.jsonl [--dry-run]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
