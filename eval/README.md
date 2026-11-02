@@ -60,6 +60,21 @@ For production runners that build the model prompt before the first tool call,
 use `cm brief --format prompt` and prepend its stdout to the task. That removes
 the brief tool turn entirely; the harness still measures the tool-call path.
 
+### Prompt-injected A/B
+
+Same architecture question with `cm brief --format prompt --snippets 12` written
+into the task file and no cm calls:
+
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| pre-injected brief | 302,217 | 14 | 67.9s | 3 |
+| without cm | 333,255 | 14 | 83.1s | 4 |
+
+Injection cut tokens 9.3% and time 18.3% with the same tool count. It is a
+smaller win than the tool-call A/B because both agents still read the cited
+files.
+
+
 ### Measured short-task A/B
 
 Three one-session tasks, one run each, using the same model and verifier:

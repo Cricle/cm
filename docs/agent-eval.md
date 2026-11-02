@@ -88,6 +88,23 @@ conclusion: multi-session benefit is real but marginal here; it needs larger
 repositories and more than two sessions to dominate the fixed per-session brief
 cost.
 
+## Prompt-injected A/B
+
+Same architecture question, but the runner precomputed `cm brief --format prompt
+--snippets 12` and put it in the task file; the agent made no cm calls.
+
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| pre-injected brief | 302,217 | 14 | 67.9s | 3 |
+| without cm | 333,255 | 14 | 83.1s | 4 |
+
+Prompt injection cut tokens by 9.3% and wall time by 18.3% with the same tool
+count. It removes the brief tool turn, but it does not replace source reading on
+this question; both agents still opened the cited files. Treat injection as a
+smaller, safer win than the earlier tool-call A/B, not a replacement for
+repo exploration.
+
+
 ## Why it is pure overhead
 
 A follow-up cache_bug run replaced the ritual `brief` + `recall` + `remember` +
