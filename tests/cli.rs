@@ -453,6 +453,100 @@ fn task_frame_roundtrip_and_reindex() {
 }
 
 #[test]
+fn brief_resumes_current_frame_with_budgeted_context() {
+    let dir = temp_dir("brief");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "parser",
+            "--goal",
+            "Fix parser recovery",
+            "--constraint",
+            "keep format version 1",
+            "--next",
+            "add resync test",
+            "--open",
+            "error span",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--kind",
+            "decision",
+            "--subject",
+            "parser strategy",
+            "--text",
+            "Recursive descent parser uses token resync at statement boundaries",
+            "--scope",
+            "repo",
+            "--source",
+            "src/parser.rs:parse_stmt",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "cache budget",
+            "--text",
+            "Cache stays at 8 MiB",
+            "--scope",
+            "repo",
+            "--source",
+            "src/cache.rs",
+        ],
+    ));
+    let brief = run(
+        &dir,
+        &[
+            "brief", "--file", file_arg, "--task", "current", "--budget", "300",
+        ],
+    );
+    assert_ok(&brief);
+    let brief: serde_json::Value = serde_json::from_slice(&brief.stdout).expect("brief json");
+    assert_eq!(brief["frame"]["task"], "parser");
+    assert_eq!(brief["frame"]["goal"], "Fix parser recovery");
+    assert_eq!(brief["frame"]["constraints"][0], "keep format version 1");
+    assert!(brief["query"].as_str().unwrap().contains("resync"));
+    let memories = brief["memories"].as_array().unwrap();
+    assert!(!memories.is_empty(), "brief should retrieve task memories");
+    assert!(memories[0]["text"].as_str().unwrap().contains("resync"));
+    assert!(
+        brief["estimated_tokens"].as_u64().unwrap() <= 300,
+        "brief must respect its budget: {brief}"
+    );
+
+    let fallback = run(
+        &dir,
+        &[
+            "brief", "--file", file_arg, "--task", "missing", "--query", "parser", "--budget",
+            "300",
+        ],
+    );
+    assert_ok(&fallback);
+    let fallback: serde_json::Value =
+        serde_json::from_slice(&fallback.stdout).expect("fallback brief json");
+    assert!(fallback["frame"].is_null());
+    assert!(!fallback["memories"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn help_mentions_task_affinity() {
     let dir = temp_dir("help");
     let output = run(&dir, &["--help"]);

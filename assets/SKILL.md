@@ -42,6 +42,19 @@ Update the same frame at decisions or plan changes with `--status`, `--next`,
 when finished. Keep it short: goal, active constraints, next 1–3 steps, open
 questions, touched paths. Do not paste the frame into memory records.
 
+## Resume
+
+At session start, after context loss, or when handing work to another agent:
+
+```bash
+$CM brief --file "$F" --task current --budget 1200
+```
+
+`current` resolves to the latest active frame. The result is one JSON object
+with the frame and a budgeted set of relevant memories, so prefer it over
+separate `frame get` + `recall` calls. Pass an explicit task id when several
+tasks are active; pass `--query` when no frame exists.
+
 ## Write
 
 For read-only tasks, skip write-back. Otherwise:

@@ -27,7 +27,7 @@ direction: recall reduced exploration, not proof of general improvement.
 For a multi-step coding task:
 
 1. `cm frame set --task <id> --goal ... --constraint ... --next ...`
-2. `cm recall --task <id>` before implementation.
+2. `cm brief --task current` at the start of each resumed step; `cm recall --task <id>` before implementation.
 3. At decisions: write one `cm remember` record and update the frame.
 4. Mark only materially useful/wrong memories with `cm feedback`.
 5. At the end: `cm frame set --task <id> --status done`, `cm audit --root . --apply`,

@@ -31,7 +31,9 @@ cold start.
 The task frame is the small working-memory layer: goal, status, constraints,
 next steps, open questions, and touched paths for the current work item. It is
 stored as a normal memory record (`kind=frame`), superseded on update, and kept
-separate from project facts.
+separate from project facts. `cm brief` composes the active frame with a
+budgeted task working set so a new session or another agent can resume without
+re-reading the repository.
 
 ## Memory shape
 

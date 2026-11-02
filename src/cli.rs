@@ -216,6 +216,15 @@ struct ContextOut {
 }
 
 #[derive(Serialize)]
+struct BriefOut {
+    frame: Option<serde_json::Value>,
+    query: String,
+    budget: usize,
+    estimated_tokens: usize,
+    memories: Vec<MemoryOut>,
+}
+
+#[derive(Serialize)]
 struct SimilarOut {
     id: String,
     candidates: Vec<CandidateOut>,
@@ -316,6 +325,7 @@ pub fn run() -> Result<()> {
         "feedback" | "use" => cmd_feedback(&arg_path(&args), &args),
         "govern" => cmd_govern(&arg_path(&args), &args),
         "audit" => cmd_audit(&arg_path(&args), &args),
+        "brief" => cmd_brief(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
         "doctor" => {
             let ok = cmd_doctor(&arg_path(&args))?;
@@ -433,6 +443,7 @@ fn print_usage() {
          cm frame set --task <id> --goal <text> [--next <text>] [--open <text>]
          cm frame get --task <id>
          cm frame list
+         cm brief [--task <id>|current] [--budget 1200]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
          cm audit [--root <dir>] [--apply]
@@ -832,21 +843,48 @@ fn collect_frames(store: &mut Store, limit: usize) -> Result<Vec<crate::model::M
     Ok(frames)
 }
 
-fn frame_query_for_task(path: &Path, task: &str) -> Result<String> {
-    let mut store = Store::open(path)?;
-    let memory = collect_frames(&mut store, 64)?
+fn latest_frame(
+    store: &mut Store,
+    task: Option<&str>,
+) -> Result<Option<(crate::model::Memory, TaskFrame)>> {
+    let mut frames: Vec<(crate::model::Memory, TaskFrame)> = collect_frames(store, 512)?
         .into_iter()
-        .find(|memory| memory.subject == frame_subject(task))
-        .ok_or_else(|| anyhow!("no frame for task {task:?}; pass --query"))?;
-    let frame = parse_frame(&memory).ok_or_else(|| anyhow!("invalid frame payload"))?;
-    let mut parts = vec![frame.goal];
-    parts.extend(frame.next);
-    parts.extend(frame.open);
+        .filter_map(|memory| parse_frame(&memory).map(|frame| (memory, frame)))
+        .collect();
+    if let Some(task) = task.filter(|task| *task != "current") {
+        return Ok(frames
+            .into_iter()
+            .find(|(memory, _)| memory.subject == frame_subject(task)));
+    }
+    let index = frames
+        .iter()
+        .position(|(_, frame)| frame.status == "active")
+        .or_else(|| frames.iter().position(|(_, frame)| frame.status != "done"))
+        .unwrap_or(0);
+    if frames.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(frames.swap_remove(index)))
+}
+
+fn frame_query(frame: &TaskFrame) -> Option<String> {
+    let mut parts = vec![frame.goal.clone()];
+    parts.extend(frame.next.iter().cloned());
+    parts.extend(frame.open.iter().cloned());
     parts.retain(|part| !part.trim().is_empty());
     if parts.is_empty() {
-        bail!("frame for task {task:?} has no goal or next steps; pass --query");
+        None
+    } else {
+        Some(parts.join(" "))
     }
-    Ok(parts.join(" "))
+}
+
+fn frame_query_for_task(path: &Path, task: &str) -> Result<String> {
+    let mut store = Store::open(path)?;
+    let (_, frame) = latest_frame(&mut store, Some(task))?
+        .ok_or_else(|| anyhow!("no frame for task {task:?}; pass --query"))?;
+    frame_query(&frame)
+        .ok_or_else(|| anyhow!("frame for task {task:?} has no goal or next steps; pass --query"))
 }
 
 fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::Value {
@@ -1397,6 +1435,48 @@ fn cmd_context(
     compact: bool,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
+    let (selected, estimated) = select_context(
+        &mut store, query, budget, top, scope, task, kind, min_trust, max_items, min_score, compact,
+    )?;
+
+    match format.as_str() {
+        "cmx" => {
+            outln!("CMX/1");
+            for memory in &selected {
+                outln!("{}", cmx_line(memory));
+            }
+        }
+        "json" => {
+            outln!(
+                "{}",
+                serde_json::to_string(&ContextOut {
+                    query: query.to_string(),
+                    budget,
+                    estimated_tokens: estimated,
+                    compact,
+                    memories: selected.iter().map(MemoryOut::from).collect(),
+                })?
+            );
+        }
+        other => bail!("invalid context format {other:?}; expected cmx or json"),
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_context(
+    store: &mut Store,
+    query: &str,
+    budget: usize,
+    top: usize,
+    scope: Option<String>,
+    task: Option<String>,
+    kind: Option<String>,
+    min_trust: Option<String>,
+    max_items: usize,
+    min_score: f64,
+    compact: bool,
+) -> Result<(Vec<crate::model::Memory>, usize)> {
     store.set_cache_affinity(scope.as_deref(), task.as_deref());
     let tail = store.tail_view()?;
     let now = crate::model::now_ms();
@@ -1500,29 +1580,74 @@ fn cmd_context(
     }
     let ids: Vec<String> = selected.iter().map(|memory| memory.id.clone()).collect();
     store.prefetch_memory_ids(&ids)?;
+    Ok((selected, estimated))
+}
 
-    match format.as_str() {
-        "cmx" => {
-            outln!("CMX/1");
-            for memory in &selected {
-                outln!("{}", cmx_line(memory));
-            }
+fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
+    let budget = arg_usize(args, "--budget", 1200);
+    let task_arg = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
+    let explicit_query = arg_value(args, "--query");
+    let mut store = Store::open(path)?;
+    let (frame, query, frame_tokens, task) = match latest_frame(&mut store, Some(&task_arg))? {
+        Some((memory, frame)) => {
+            let query = explicit_query
+                .or_else(|| frame_query(&frame))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "frame for task {:?} has no goal or next steps; pass --query",
+                        frame.task
+                    )
+                })?;
+            let value = frame_json(&memory, &frame);
+            let tokens = estimate_tokens(&serde_json::to_string(&value)?);
+            (Some(value), query, tokens, Some(frame.task))
         }
-        "json" => {
-            outln!(
-                "{}",
-                serde_json::to_string(&ContextOut {
-                    query: query.to_string(),
-                    budget,
-                    estimated_tokens: estimated,
-                    compact,
-                    memories: selected.iter().map(MemoryOut::from).collect(),
-                })?
-            );
+        None => {
+            let query = explicit_query.ok_or_else(|| {
+                anyhow!("no frame for this workspace; run cm frame set or pass --query")
+            })?;
+            (None, query, 0, (task_arg != "current").then_some(task_arg))
         }
-        other => bail!("invalid context format {other:?}; expected cmx or json"),
+    };
+    let memory_budget = budget.saturating_sub(frame_tokens);
+    let (selected, _) = select_context(
+        &mut store,
+        &query,
+        memory_budget,
+        arg_usize(args, "--top", 16),
+        arg_value(args, "--scope"),
+        task,
+        None,
+        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "authored".to_string())),
+        arg_usize(args, "--max-items", 5),
+        0.0,
+        true,
+    )?;
+    let mut memories: Vec<MemoryOut> = selected.iter().map(MemoryOut::from).collect();
+    let mut memory_tokens = json_tokens(&memories)?;
+    while !memories.is_empty() && frame_tokens + memory_tokens > budget {
+        memories.pop();
+        memory_tokens = json_tokens(&memories)?;
     }
+    outln!(
+        "{}",
+        serde_json::to_string(&BriefOut {
+            frame,
+            query,
+            budget,
+            estimated_tokens: frame_tokens + memory_tokens,
+            memories,
+        })?
+    );
     Ok(())
+}
+
+fn json_tokens(memories: &[MemoryOut]) -> Result<usize> {
+    let mut total = 0usize;
+    for memory in memories {
+        total += estimate_tokens(&serde_json::to_string(memory)?);
+    }
+    Ok(total)
 }
 
 fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Result<()> {
