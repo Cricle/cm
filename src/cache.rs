@@ -10,7 +10,7 @@ use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 use crate::model::now_ms;
 
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
-const CACHE_VERSION: u8 = 2;
+const CACHE_VERSION: u8 = 1;
 const CACHE_HEADER: usize = 64;
 const MAX_CACHE_SIZE: usize = 256 * 1024 * 1024;
 const MIN_CACHE_SIZE: usize = 8 * 1024 * 1024;
