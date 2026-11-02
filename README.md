@@ -30,6 +30,26 @@ cm recall --file cm --query "build" --scope repo --budget 500
 cm status --file cm
 ```
 
+## Install skills and binary
+
+```bash
+cm install --detected              # install into detected agent roots + global cm
+cm install --all                   # install into every known agent root
+cm install --agent claude --agent cursor
+cm install --list                  # show agent IDs and paths
+cm install --no-exe --dry-run      # skills only, show paths
+cm uninstall --all                 # remove installed skills, exe, and our PATH entry
+cm uninstall --agent claude
+cm install --no-path               # install exe without modifying PATH
+```
+
+The global executable is copied or symlinked to `~/.local/bin/cm` on Unix and
+`%USERPROFILE%\.local\bin\cm.exe` on Windows. Installation state and backups are
+stored in `~/.cm/install.json` and `~/.cm/backups/`; uninstall restores a
+pre-existing skill or executable when present. `cm install --all` creates the
+known personal skill directories from the agent path list. `cm skill --install`
+remains the project-local installation path.
+
 ## Everyday use
 
 ```text

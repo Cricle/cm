@@ -21,6 +21,7 @@ use crate::store::{
 };
 
 mod cache;
+mod install;
 mod model;
 mod store;
 
@@ -302,6 +303,8 @@ fn run() -> Result<()> {
             has_flag(&args, "--check"),
             arg_value(&args, "--dir"),
         ),
+        "install" => install::cmd_install(&args, SKILL_TEXT),
+        "uninstall" => install::cmd_uninstall(&args, SKILL_TEXT),
         "get" => {
             let id = arg_value(&args, "--id").ok_or_else(|| anyhow!("get requires --id"))?;
             cmd_get(&arg_path(&args), &id)
@@ -392,6 +395,8 @@ fn print_usage() {
          cm forget --file cm --id <id>
          cm status [--file cm]
          cm doctor [--strict] [--file cm]
+         cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
+         cm uninstall [--all|--agent <id>] [--keep-exe]
          cm skill [--json] [--install] [--check]
          
          Internal/advanced commands: see README."
