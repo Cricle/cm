@@ -221,7 +221,31 @@ struct BriefOut {
     query: String,
     budget: usize,
     estimated_tokens: usize,
-    memories: Vec<MemoryOut>,
+    memories: Vec<BriefMemory>,
+}
+
+#[derive(Serialize)]
+struct BriefMemory {
+    id: String,
+    kind: String,
+    subject: String,
+    text: String,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_commit: Option<String>,
+}
+
+impl From<&crate::model::Memory> for BriefMemory {
+    fn from(memory: &crate::model::Memory) -> Self {
+        Self {
+            id: memory.id.clone(),
+            kind: memory.kind.clone(),
+            subject: memory.subject.clone(),
+            text: memory.text.clone(),
+            source: memory.source.clone(),
+            source_commit: memory.source_commit.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1623,7 +1647,7 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         0.0,
         true,
     )?;
-    let mut memories: Vec<MemoryOut> = selected.iter().map(MemoryOut::from).collect();
+    let mut memories: Vec<BriefMemory> = selected.iter().map(BriefMemory::from).collect();
     let mut memory_tokens = json_tokens(&memories)?;
     while !memories.is_empty() && frame_tokens + memory_tokens > budget {
         memories.pop();
@@ -1642,7 +1666,7 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn json_tokens(memories: &[MemoryOut]) -> Result<usize> {
+fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {
     let mut total = 0usize;
     for memory in memories {
         total += estimate_tokens(&serde_json::to_string(memory)?);
