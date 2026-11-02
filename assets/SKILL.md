@@ -113,7 +113,8 @@ $CM absorb --file "$F" --input result.jsonl
 
 `absorb` accepts only `remember`, `supersede`, and `forget`; every write needs
 evidence IDs from the pack and a real `path:symbol` or `agent:<name>` source.
-The model proposes; `cm` verifies and stores.
+Exact duplicates are detected and skipped. The model proposes; `cm` verifies and
+stores.
 
 ## Maintain
 

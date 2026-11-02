@@ -862,6 +862,21 @@ fn pack_and_absorb_compress_memories() {
     assert_ok(&absorb);
     let report: serde_json::Value = serde_json::from_slice(&absorb.stdout).expect("absorb json");
     assert_eq!(report["written"], 1);
+    let repeat = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+        ],
+    );
+    assert_ok(&repeat);
+    let repeat: serde_json::Value =
+        serde_json::from_slice(&repeat.stdout).expect("repeat absorb json");
+    assert_eq!(repeat["written"], 0);
+    assert_eq!(repeat["duplicates"], 1);
 
     let bad = "{\"op\":\"remember\",\"kind\":\"fact\",\"scope\":\"repo\",\"subject\":\"bad\",\"text\":\"bad memory\",\"source\":\"agent:llm\",\"evidence\":[\"missing\"]}\n";
     let bad_path = dir.join("bad.jsonl");

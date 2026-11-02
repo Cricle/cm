@@ -94,9 +94,9 @@ from the brief until `govern --apply` forgets them.
 prints a deterministic prompt with the task frame and a budgeted set of evidence
 memories; send it to any model and ask for strict JSONL. `absorb` accepts only
 `remember`, `supersede`, and `forget` operations, requires evidence IDs, rejects
-reserved kinds/scopes, and validates `path:symbol` anchors before writing.
-`--dry-run` validates without writing. The model proposes; `cm` still verifies
-and stores.
+reserved kinds/scopes, validates `path:symbol` anchors, and reuses the ordinary
+exact-duplicate check. `--dry-run` validates without writing. The model
+proposes; `cm` still verifies and stores.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together

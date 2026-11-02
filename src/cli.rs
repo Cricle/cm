@@ -320,6 +320,7 @@ struct AbsorbOut {
     ok: bool,
     accepted: usize,
     written: usize,
+    duplicates: usize,
     forgotten: usize,
     dry_run: bool,
 }
@@ -2525,35 +2526,48 @@ fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp]) -> Result<()> {
     Ok(())
 }
 
-fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<serde_json::Value> {
+fn absorb_input(op: &AbsorbOp) -> Result<AppendInput> {
+    let mut supersedes = op.supersedes.clone();
+    if let Some(id) = &op.id {
+        supersedes.push(id.clone());
+    }
+    Ok(AppendInput {
+        kind: op.kind.clone().unwrap_or_default(),
+        scope: op.scope.clone().unwrap_or_default(),
+        subject: op.subject.clone().unwrap_or_default(),
+        text: op.text.clone().unwrap_or_default(),
+        source: op.source.clone().unwrap_or_default(),
+        confidence: op.confidence.unwrap_or(0.8).clamp(0.0, 1.0),
+        valid_from: 0,
+        valid_to: None,
+        supersedes,
+        conflict_of: None,
+        trust: Some("authored".to_string()),
+        source_commit: None,
+    })
+}
+
+enum AbsorbOutcome {
+    Written,
+    Duplicate,
+    Forgotten,
+}
+
+fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<AbsorbOutcome> {
     match op.op.as_str() {
         "remember" | "supersede" => {
-            let mut supersedes = op.supersedes.clone();
-            if let Some(id) = &op.id {
-                supersedes.push(id.clone());
-            }
-            let input = AppendInput {
-                kind: op.kind.clone().unwrap_or_default(),
-                scope: op.scope.clone().unwrap_or_default(),
-                subject: op.subject.clone().unwrap_or_default(),
-                text: op.text.clone().unwrap_or_default(),
-                source: op.source.clone().unwrap_or_default(),
-                confidence: op.confidence.unwrap_or(0.8).clamp(0.0, 1.0),
-                valid_from: 0,
-                valid_to: None,
-                supersedes,
-                conflict_of: None,
-                trust: Some("authored".to_string()),
-                source_commit: None,
-            };
+            let input = absorb_input(op)?;
             let memory = memory_from_input(&input)?;
+            if find_tail_duplicate(path, &memory)?.is_some() {
+                return Ok(AbsorbOutcome::Duplicate);
+            }
             append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
-            Ok(json!({"op": op.op, "id": memory.id}))
+            Ok(AbsorbOutcome::Written)
         }
         "forget" => {
             let id = op.id.clone().unwrap_or_default();
             append_tombstone(path, &id, op.reason.as_deref().unwrap_or("absorb"))?;
-            Ok(json!({"op": "forget", "id": id}))
+            Ok(AbsorbOutcome::Forgotten)
         }
         other => bail!("invalid op {other:?}"),
     }
@@ -2572,15 +2586,15 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     validate_absorb_ops(&mut store, &ops)?;
     drop(store);
     let mut written = 0usize;
+    let mut duplicates = 0usize;
     let mut forgotten = 0usize;
     if !dry_run {
         for op in &ops {
-            if matches!(op.op.as_str(), "remember" | "supersede") {
-                written += 1;
-            } else {
-                forgotten += 1;
+            match apply_absorb_op(path, op)? {
+                AbsorbOutcome::Written => written += 1,
+                AbsorbOutcome::Duplicate => duplicates += 1,
+                AbsorbOutcome::Forgotten => forgotten += 1,
             }
-            apply_absorb_op(path, op)?;
         }
     } else {
         for op in &ops {
@@ -2597,6 +2611,7 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
             ok: true,
             accepted: ops.len(),
             written,
+            duplicates,
             forgotten,
             dry_run,
         })?
