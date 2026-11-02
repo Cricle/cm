@@ -2231,6 +2231,7 @@ fn brief_prompt(
         push_prompt_list(&mut out, "NEXT:", frame.get("next"));
         push_prompt_list(&mut out, "OPEN:", frame.get("open"));
         push_prompt_list(&mut out, "TOUCHES:", frame.get("touches"));
+        push_prompt_list(&mut out, "NOTES:", frame.get("notes"));
     }
     out.push_str("QUERY: ");
     out.push_str(query);
