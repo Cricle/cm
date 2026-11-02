@@ -94,8 +94,9 @@ from the brief until `govern --apply` forgets them.
 prints a deterministic prompt with the task frame and a budgeted set of evidence
 memories; send it to any model and ask for strict JSONL. `absorb` accepts only
 `remember`, `supersede`, and `forget` operations, requires evidence IDs, rejects
-reserved kinds/scopes, and validates `path:symbol` anchors before writing. The
-model proposes; `cm` still verifies and stores.
+reserved kinds/scopes, and validates `path:symbol` anchors before writing.
+`--dry-run` validates without writing. The model proposes; `cm` still verifies
+and stores.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
@@ -146,7 +147,7 @@ cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
 cm pack --file cm [--task <id>|current] [--budget 1200] [--scope <scope>] [--top 16] [--max-items 8] [--query <text>]
-cm absorb --file cm --input result.jsonl
+cm absorb --file cm --input result.jsonl [--dry-run]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]

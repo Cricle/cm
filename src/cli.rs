@@ -321,6 +321,7 @@ struct AbsorbOut {
     accepted: usize,
     written: usize,
     forgotten: usize,
+    dry_run: bool,
 }
 
 #[derive(Serialize)]
@@ -541,7 +542,7 @@ fn print_usage() {
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm pack [--task <id>|current] [--budget 1200] > pack.prompt
-         cm absorb --input result.jsonl
+         cm absorb --input result.jsonl [--dry-run]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
@@ -2560,6 +2561,7 @@ fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<serde_json::Value> {
 
 fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
+    let dry_run = has_flag(args, "--dry-run");
     let content = if input == "-" {
         io::read_to_string(io::stdin())?
     } else {
@@ -2571,13 +2573,23 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     drop(store);
     let mut written = 0usize;
     let mut forgotten = 0usize;
-    for op in &ops {
-        if matches!(op.op.as_str(), "remember" | "supersede") {
-            written += 1;
-        } else {
-            forgotten += 1;
+    if !dry_run {
+        for op in &ops {
+            if matches!(op.op.as_str(), "remember" | "supersede") {
+                written += 1;
+            } else {
+                forgotten += 1;
+            }
+            apply_absorb_op(path, op)?;
         }
-        apply_absorb_op(path, op)?;
+    } else {
+        for op in &ops {
+            if matches!(op.op.as_str(), "remember" | "supersede") {
+                written += 1;
+            } else {
+                forgotten += 1;
+            }
+        }
     }
     outln!(
         "{}",
@@ -2586,6 +2598,7 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
             accepted: ops.len(),
             written,
             forgotten,
+            dry_run,
         })?
     );
     Ok(())

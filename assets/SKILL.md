@@ -107,6 +107,7 @@ the external-model loop:
 ```bash
 $CM pack --file "$F" --task current --budget 1200 > pack.prompt
 # send pack.prompt to the model, save strict JSONL as result.jsonl
+$CM absorb --file "$F" --input result.jsonl --dry-run
 $CM absorb --file "$F" --input result.jsonl
 ```
 
