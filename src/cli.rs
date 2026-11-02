@@ -996,6 +996,7 @@ fn save_frame(
 
 fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
     let task = frame_task(args)?;
+    let _lock = crate::store::acquire_store_lock(path)?;
     let mut store = Store::open(path)?;
     let existing = collect_frames(&mut store, 64)?
         .into_iter()
@@ -1055,7 +1056,7 @@ fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
         existing_id,
         &source,
         arg_value(args, "--source-commit"),
-        false,
+        true,
     )?;
     outln!(
         "{}",
@@ -1157,6 +1158,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
     let owner = arg_value(args, "--owner");
+    let _lock = crate::store::acquire_store_lock(path)?;
     let mut store = Store::open(path)?;
     let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
         .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
@@ -1171,7 +1173,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
             frame.notes.push(note);
         }
     }
-    let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None, false)?;
+    let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None, true)?;
 
     let summary_id = if let Some(summary) = summary.as_deref() {
         let input = AppendInput {
@@ -1189,7 +1191,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
             source_commit: None,
         };
         let summary_memory = memory_from_input(&input)?;
-        append_record(
+        crate::store::append_record_unlocked(
             path,
             crate::store::T_MEMORY,
             &memory_payload(&summary_memory),
@@ -1200,6 +1202,8 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
         None
     };
 
+    drop(store);
+    drop(_lock);
     let audit = run_audit(path, &root, apply, false, None, None)?;
     let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
     outln!(
