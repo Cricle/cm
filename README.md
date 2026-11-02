@@ -109,10 +109,12 @@ supersede the previous frame. `feedback` records useful/stale/wrong signals;
 duplicates with `--apply`, and folds near-duplicates when `--merge` is set.
 `audit --root <repo>` checks that each `path:symbol` source still exists, that
 the symbol is present, and that the source excerpt hash captured at write time
-still matches. `--scope` and `--limit` bound large-store audits; `--refresh`
-re-anchors reviewed `source_changed` records under new IDs, superseding the old
-records. `--apply` records stale feedback for remaining `missing_source`,
-`missing_symbol`, or `source_changed` drift, which `govern` then surfaces.
+still matches. `--changed` audits only sources touched in `git status`, making
+the check proportional to a change set. `--scope` and `--limit` bound
+large-store audits; `--refresh` re-anchors reviewed `source_changed` records
+under new IDs, superseding the old records. `--apply` records stale feedback for
+remaining `missing_source`, `missing_symbol`, or `source_changed` drift, which
+`govern` then surfaces.
 Source paths are part of the BM25 token stream, so file/symbol queries work
 without embeddings. Read commands may create or update the disposable
 `cm.cache` cache; `cm` remains unchanged.
@@ -138,7 +140,7 @@ cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
-cm audit --root <repo> [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--file cm]
+cm audit --root <repo> [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]

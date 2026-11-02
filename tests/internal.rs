@@ -1019,6 +1019,23 @@ mod cli_tests {
     }
 
     #[test]
+    fn changed_paths_reports_git_changes() {
+        let dir = temp_store_dir();
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&dir)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed: {init:?}");
+        let src = dir.join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("a.rs"), "fn a() {}\n").expect("write source");
+        let changed = changed_paths(&dir).expect("changed paths");
+        assert!(changed.contains("src/a.rs"), "changed = {changed:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn doctor_flags_truncated_tail_record() {
         let dir = temp_store_dir();
         let path = dir.join("cm");

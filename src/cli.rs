@@ -487,7 +487,7 @@ fn print_usage() {
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
-         cm audit [--root <dir>] [--scope <scope>] [--limit <n>] [--refresh] [--apply]
+         cm audit [--root <dir>] [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -1252,7 +1252,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
 
     drop(store);
     drop(_lock);
-    let audit = run_audit(path, &root, apply, false, None, None)?;
+    let audit = run_audit(path, &root, apply, false, false, None, None)?;
     let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
     outln!(
         "{}",
@@ -1483,6 +1483,41 @@ fn run_govern(
     }))
 }
 
+/// Relative paths reported by `git status --porcelain=v1 -z`, normalized to
+/// lowercase forward slashes so audit can match memory sources on any OS.
+pub(crate) fn changed_paths(root: &Path) -> Result<HashSet<String>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("-uall")
+        .output()
+        .context("run git status")?;
+    if !output.status.success() {
+        bail!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let data = String::from_utf8_lossy(&output.stdout);
+    let mut paths = HashSet::new();
+    for entry in data.split('\0').filter(|entry| !entry.is_empty()) {
+        let mut parts = entry.splitn(3, char::is_whitespace);
+        let _status = parts.next();
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let path = path.rsplit_once(" -> ").map(|(_, new)| new).unwrap_or(path);
+        paths.insert(path.replace('\\', "/").to_lowercase());
+    }
+    Ok(paths)
+}
+
 fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
     let source = source.trim();
     if source.is_empty() || source.starts_with("agent:") || source.contains("://") {
@@ -1566,13 +1601,13 @@ fn source_anchor(source: &str) -> Option<(u32, String)> {
 
 fn source_snippet(memory: &crate::model::Memory, root: &Path, lines: usize) -> Option<String> {
     let (relative, _) = source_parts(&memory.source)?;
+    let line = memory.source_line? as usize;
     let text = fs::read_to_string(root.join(relative)).ok()?;
     let all: Vec<&str> = text.lines().collect();
     if all.is_empty() {
         return None;
     }
-    let anchor = memory.source_line.unwrap_or(1) as usize;
-    let start = anchor.saturating_sub(1).saturating_sub(2);
+    let start = line.saturating_sub(1).saturating_sub(2);
     let end = (start + lines.max(1)).min(all.len());
     Some(all[start..end].join("\n"))
 }
@@ -1612,6 +1647,7 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
     let refresh = has_flag(args, "--refresh");
+    let changed = has_flag(args, "--changed");
     let scope = arg_value(args, "--scope");
     let limit = arg_value(args, "--limit").and_then(|value| value.parse::<usize>().ok());
     outln!(
@@ -1621,6 +1657,7 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
             &root,
             apply,
             refresh,
+            changed,
             scope.as_deref(),
             limit,
         )?)?
@@ -1633,11 +1670,20 @@ fn run_audit(
     root: &Path,
     apply: bool,
     refresh: bool,
+    changed_only: bool,
     scope: Option<&str>,
     limit: Option<usize>,
 ) -> Result<serde_json::Value> {
     let mut store = Store::open(path)?;
     let mut memories = active_memories(&mut store)?;
+    if changed_only {
+        let changed = changed_paths(root)?;
+        memories.retain(|memory| {
+            source_parts(&memory.source).is_some_and(|(relative, _)| {
+                changed.contains(&relative.to_string_lossy().replace('\\', "/").to_lowercase())
+            })
+        });
+    }
     if let Some(scope) = scope {
         memories.retain(|memory| memory.scope == scope);
     }
@@ -1763,6 +1809,7 @@ fn run_audit(
         "issue_count": total,
         "apply": apply,
         "refreshed": refreshed,
+        "changed_only": changed_only,
         "scope": scope,
         "limit": limit
     }))

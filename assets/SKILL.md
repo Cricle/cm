@@ -105,7 +105,7 @@ $CM feedback --file "$F" --id <id> --signal useful
 $CM feedback --file "$F" --id <id> --signal wrong --note "incorrect"
 $CM govern --file "$F"
 $CM govern --file "$F" --merge --apply
-$CM audit --file "$F" --root .
+$CM audit --file "$F" --root . --changed
 $CM audit --file "$F" --root . --refresh
 $CM audit --file "$F" --root . --apply
 $CM finish --file "$F" --task current --summary "<outcome>" --root . --apply
