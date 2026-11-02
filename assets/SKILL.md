@@ -105,6 +105,7 @@ $CM feedback --file "$F" --id <id> --signal wrong --note "incorrect"
 $CM govern --file "$F"
 $CM govern --file "$F" --merge --apply
 $CM audit --file "$F" --root .
+$CM audit --file "$F" --root . --refresh
 $CM audit --file "$F" --root . --apply
 $CM finish --file "$F" --task current --summary "<outcome>" --root . --apply
 $CM status --file "$F"
@@ -116,7 +117,8 @@ when it misled you. `cm govern` is dry-run by default; `--apply` forgets only
 negative-feedback memories and exact duplicates, and `--merge` folds
 near-duplicates when applying. `cm audit` checks `path:symbol` sources, including
 the source excerpt hash captured at write time; `--apply` records stale feedback
-for drift. `cm finish` marks the frame done, writes the summary as one episode,
-and runs audit plus governance.
+for drift. `--refresh` re-anchors reviewed `source_changed` records under new IDs,
+superseding the old records. `cm finish` marks the frame done, writes the summary
+as one episode, and runs audit plus governance.
 
 `cm.cache` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.

@@ -484,7 +484,7 @@ fn print_usage() {
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
-         cm audit [--root <dir>] [--scope <scope>] [--limit <n>] [--apply]
+         cm audit [--root <dir>] [--scope <scope>] [--limit <n>] [--refresh] [--apply]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -1200,7 +1200,7 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
         None
     };
 
-    let audit = run_audit(path, &root, apply, None, None)?;
+    let audit = run_audit(path, &root, apply, false, None, None)?;
     let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
     outln!(
         "{}",
@@ -1510,11 +1510,19 @@ fn audit_source_issue(
 fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
+    let refresh = has_flag(args, "--refresh");
     let scope = arg_value(args, "--scope");
     let limit = arg_value(args, "--limit").and_then(|value| value.parse::<usize>().ok());
     outln!(
         "{}",
-        serde_json::to_string(&run_audit(path, &root, apply, scope.as_deref(), limit)?)?
+        serde_json::to_string(&run_audit(
+            path,
+            &root,
+            apply,
+            refresh,
+            scope.as_deref(),
+            limit,
+        )?)?
     );
     Ok(())
 }
@@ -1523,6 +1531,7 @@ fn run_audit(
     path: &Path,
     root: &Path,
     apply: bool,
+    refresh: bool,
     scope: Option<&str>,
     limit: Option<usize>,
 ) -> Result<serde_json::Value> {
@@ -1591,11 +1600,54 @@ fn run_audit(
             .cmp(&b["id"].as_str())
             .then_with(|| a["issue"].as_str().cmp(&b["issue"].as_str()))
     });
+    let mut refreshed = Vec::new();
+    let mut refreshed_old = HashSet::new();
+    if refresh {
+        for issue in &issues {
+            if issue["issue"] != "source_changed" {
+                continue;
+            }
+            let Some(id) = issue["id"].as_str() else {
+                continue;
+            };
+            let Some(memory) = memories.iter().find(|memory| memory.id == id) else {
+                continue;
+            };
+            let Some((relative, symbol)) = source_parts(&memory.source) else {
+                continue;
+            };
+            let full = root.join(relative);
+            let Ok(text) = fs::read_to_string(&full) else {
+                continue;
+            };
+            let Some((line, hash)) = anchor_text(&text, symbol.as_deref()) else {
+                continue;
+            };
+            let mut updated = memory.clone();
+            updated.id = crate::model::new_id();
+            updated.created_at = now;
+            updated.valid_from = now;
+            updated.source_hash = Some(hash);
+            updated.source_line = (line > 0).then_some(line);
+            updated.supersedes = vec![memory.id.clone()];
+            append_record(
+                path,
+                crate::store::T_MEMORY,
+                &memory_payload(&updated),
+                true,
+            )?;
+            refreshed_old.insert(memory.id.clone());
+            refreshed.push(updated.id);
+        }
+    }
     if apply {
         for issue in &issues {
             let Some(id) = issue["id"].as_str() else {
                 continue;
             };
+            if refreshed_old.contains(id) {
+                continue;
+            }
             let reason = issue["issue"].as_str().unwrap_or("source drift");
             write_feedback(path, id, "stale", Some(reason), "audit")?;
         }
@@ -1609,6 +1661,7 @@ fn run_audit(
         "issues": issues,
         "issue_count": total,
         "apply": apply,
+        "refreshed": refreshed,
         "scope": scope,
         "limit": limit
     }))

@@ -292,6 +292,17 @@ fn audit_detects_source_hash_drift() {
     assert_eq!(report["issue_count"], 1);
     assert_eq!(report["issues"][0]["issue"], "source_changed");
     assert_eq!(report["issues"][0]["source_line"], 1);
+    let refreshed = run(
+        &dir,
+        &["audit", "--file", file_arg, "--root", root_arg, "--refresh"],
+    );
+    assert_ok(&refreshed);
+    let report: serde_json::Value = serde_json::from_slice(&refreshed.stdout).expect("audit json");
+    assert_eq!(report["refreshed"].as_array().unwrap().len(), 1);
+    let clean = run(&dir, &["audit", "--file", file_arg, "--root", root_arg]);
+    assert_ok(&clean);
+    let report: serde_json::Value = serde_json::from_slice(&clean.stdout).expect("audit json");
+    assert_eq!(report["issue_count"], 0);
     fs::remove_dir_all(&dir).ok();
 }
 
