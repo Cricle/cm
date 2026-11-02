@@ -17,9 +17,9 @@ use crate::model::{
 };
 
 pub(crate) const HEADER_LEN: usize = 128;
-const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
-const HEADER_SLOT: usize = HEADER_LEN;
-const HEADER_FLAG_DUAL: u32 = 1;
+pub(crate) const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
+pub(crate) const HEADER_SLOT: usize = HEADER_LEN;
+pub(crate) const HEADER_FLAG_DUAL: u32 = 1;
 const HEADER_FLAG_PAGE_INDEX: u32 = 2;
 const PAGE_SIZE: usize = 64 * 1024;
 const PAGE_MAGIC: &[u8; 8] = b"CMPG1\0\0\0";
@@ -27,7 +27,7 @@ const PAGE_ENTRY: usize = 24;
 const PAGE_TABLE_HEADER: usize = 24;
 const INDEX_PAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const INDEX_PAGE_CACHE_PAGES: usize = INDEX_PAGE_CACHE_BYTES / PAGE_SIZE;
-const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
+pub(crate) const INDEX_MARKER: &[u8; 8] = b"CMIX1\0\0\0";
 const INDEX_MARKER_LEN: usize = 16;
 pub(crate) const BLOCK_ENTRY: usize = 24;
 pub(crate) const DOC_SIZE: usize = 32;
@@ -42,8 +42,8 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 const BLOCK_RAW: usize = 64 * 1024;
 const ZSTD_LEVEL: i32 = 3;
 
-const T_MEMORY: u8 = 2;
-const T_MERGE: u8 = 3;
+pub(crate) const T_MEMORY: u8 = 2;
+pub(crate) const T_MERGE: u8 = 3;
 const T_TOMBSTONE: u8 = 4;
 
 #[derive(Clone, Copy, Debug)]
@@ -797,6 +797,31 @@ impl Store {
         &self.index
     }
 
+    /// Set the working-set affinity for blocks touched by this query.
+    pub(crate) fn set_cache_affinity(&mut self, scope: Option<&str>, task: Option<&str>) {
+        self.cache.set_affinity(scope, task);
+    }
+
+    /// Warm the blocks belonging to selected memory ids. This makes the
+    /// query's result set part of the active scope/task working set.
+    pub(crate) fn prefetch_memory_ids(&mut self, ids: &[String]) -> Result<()> {
+        let mut blocks = Vec::new();
+        for id in ids {
+            if let Some((idx, _)) = self.find_doc(id)? {
+                blocks.push(self.doc_meta(idx)?.block_id);
+            }
+        }
+        blocks.sort_unstable();
+        blocks.dedup();
+        for block_id in blocks {
+            let data = std::sync::Arc::clone(&self.mmap);
+            let header = self.header;
+            self.cache
+                .get_block(block_id, || decompress_block(&data, &header, block_id))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn doc_meta(&self, idx: u32) -> Result<DocMeta> {
         let ib = self.index();
         let docs_off = ib.read_u64(24)? as usize;
@@ -1443,7 +1468,7 @@ pub(crate) fn read_records_from(data: &[u8], start: usize) -> Result<Vec<Record>
 /// Like `read_records_from`, but rejects a truncated record or trailing bytes
 /// instead of silently ignoring them. Used by `verify_full` so `cm doctor`
 /// cannot report a healthy file after tail data loss or garbage was appended.
-fn read_records_from_checked(data: &[u8], start: usize) -> Result<Vec<Record>> {
+pub(crate) fn read_records_from_checked(data: &[u8], start: usize) -> Result<Vec<Record>> {
     let (records, offset) = read_records_from_impl(data, start, true)?;
     if offset != data.len() {
         bail!(
@@ -2350,7 +2375,7 @@ fn decode_header_at(data: &[u8], offset: usize) -> Result<Header> {
     })
 }
 
-fn read_current_header_with_slot(data: &[u8]) -> Result<(Header, usize)> {
+pub(crate) fn read_current_header_with_slot(data: &[u8]) -> Result<(Header, usize)> {
     let first = decode_header_at(data, 0);
     if let Ok(header) = first {
         if header.flags & HEADER_FLAG_DUAL == 0 {
@@ -2421,558 +2446,4 @@ fn write_f64(data: &mut [u8], offset: usize, value: f64) {
 }
 fn align8(value: usize) -> usize {
     (value + 7) & !7
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{build_merged, memory_payload, new_memory};
-    use std::time::Duration;
-
-    fn temp_store_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cm-store-test-{}", crate::model::new_id()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir.join("cm")
-    }
-
-    fn empty_indexed_store() -> PathBuf {
-        let path = temp_store_path();
-        let header = Header {
-            created_at: 0,
-            block_table_off: HEADER_LEN as u64,
-            block_count: 0,
-            index_off: HEADER_LEN as u64,
-            index_len: 0,
-            index_raw_len: 0,
-            index_hash: 0,
-            data_start: HEADER_LEN as u64,
-            tail_start: HEADER_LEN as u64,
-            doc_count: 0,
-            generation: 0,
-            flags: 0,
-        };
-        fs::write(&path, encode_header(&header)).expect("write header");
-        reindex_file(&path).expect("reindex empty store");
-        path
-    }
-
-    fn cleanup(path: &Path) {
-        if let Some(parent) = path.parent() {
-            fs::remove_dir_all(parent).ok();
-        }
-    }
-
-    fn sample_record() -> Vec<u8> {
-        let memory = new_memory(
-            "fact",
-            "test",
-            "subject",
-            "body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        encode_record(T_MEMORY, 0, &memory_payload(&memory)).expect("encode record")
-    }
-
-    #[test]
-    fn checked_reader_accepts_complete_record() {
-        let record = sample_record();
-        let records = read_records_from_checked(&record, 0).expect("complete record");
-        assert_eq!(records.len(), 1);
-    }
-
-    #[test]
-    fn checked_reader_rejects_truncated_record_and_trailing_bytes() {
-        let record = sample_record();
-        assert!(read_records_from_checked(&record[..record.len() - 1], 0).is_err());
-
-        let mut padded = record;
-        padded.extend_from_slice(b"junk");
-        assert!(read_records_from_checked(&padded, 0).is_err());
-    }
-
-    #[test]
-    fn checkpoint_waits_for_writer_lock() {
-        let path = empty_indexed_store();
-        let lock = acquire_store_lock(&path).expect("hold store lock");
-        let checkpoint_path = path.clone();
-        let handle = std::thread::spawn(move || checkpoint_file(&checkpoint_path, false));
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(
-            !handle.is_finished(),
-            "checkpoint must block while a writer holds the store lock"
-        );
-        drop(lock);
-        let header = handle.join().expect("join checkpoint").expect("checkpoint");
-        assert_eq!(header.doc_count, 0);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn append_waits_for_writer_lock() {
-        let path = empty_indexed_store();
-        let before = fs::metadata(&path).expect("metadata").len();
-        let lock = acquire_store_lock(&path).expect("hold store lock");
-        let append_path = path.clone();
-        let handle =
-            std::thread::spawn(move || append_record(&append_path, T_MEMORY, b"payload", true));
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(
-            !handle.is_finished(),
-            "append must block while a writer holds the store lock"
-        );
-        drop(lock);
-        handle.join().expect("join append").expect("append");
-        let data = fs::read(&path).expect("read store");
-        assert!(data.len() > before as usize);
-        let header = read_header_file(&path).expect("header");
-        let records = read_records_from(&data, header.tail_start as usize).expect("tail");
-        assert_eq!(records.len(), 1);
-        cleanup(&path);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn append_does_not_block_concurrent_header_reads() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let path = empty_indexed_store();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let started = Arc::new(AtomicBool::new(false));
-        let reader_path = path.clone();
-        let reader_stop = Arc::clone(&stopping);
-        let reader_started = Arc::clone(&started);
-        let reader = std::thread::spawn(move || {
-            reader_started.store(true, Ordering::Release);
-            let mut failures = Vec::new();
-            while !reader_stop.load(Ordering::Acquire) {
-                if let Err(error) = read_header_file(&reader_path) {
-                    failures.push(format!("{error:#}"));
-                    break;
-                }
-            }
-            failures
-        });
-        while !started.load(Ordering::Acquire) {
-            std::hint::spin_loop();
-        }
-        append_record(&path, T_MEMORY, &vec![7u8; 8 * 1024 * 1024], true).expect("append");
-        stopping.store(true, Ordering::Release);
-        let failures = reader.join().expect("join reader");
-        assert!(
-            failures.is_empty(),
-            "header reads must not hit the writer's byte-range lock: {failures:?}"
-        );
-        cleanup(&path);
-    }
-
-    fn test_header(generation: u64, flags: u32) -> Header {
-        Header {
-            created_at: 1,
-            block_table_off: DUAL_HEADER_LEN as u64,
-            block_count: 0,
-            index_off: DUAL_HEADER_LEN as u64,
-            index_len: 1,
-            index_raw_len: 1,
-            index_hash: 0,
-            data_start: DUAL_HEADER_LEN as u64,
-            tail_start: DUAL_HEADER_LEN as u64,
-            doc_count: 0,
-            generation,
-            flags,
-        }
-    }
-
-    #[test]
-    fn header_selection_uses_newest_valid_slot() {
-        let mut data = vec![0u8; DUAL_HEADER_LEN];
-        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(3, HEADER_FLAG_DUAL)));
-        data[HEADER_SLOT..].copy_from_slice(&encode_header(&test_header(4, HEADER_FLAG_DUAL)));
-        let (header, slot) = read_current_header_with_slot(&data).expect("header B");
-        assert_eq!((header.generation, slot), (4, HEADER_SLOT));
-
-        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(5, HEADER_FLAG_DUAL)));
-        let (header, slot) = read_current_header_with_slot(&data).expect("header A");
-        assert_eq!((header.generation, slot), (5, 0));
-
-        data[HEADER_SLOT] = b'X';
-        let (header, slot) = read_current_header_with_slot(&data).expect("corrupt B fallback");
-        assert_eq!((header.generation, slot), (5, 0));
-
-        data[..HEADER_LEN].copy_from_slice(&encode_header(&test_header(2, HEADER_FLAG_DUAL)));
-        data[HEADER_SLOT..].copy_from_slice(&encode_header(&test_header(4, HEADER_FLAG_DUAL)));
-        data[0] = b'X';
-        let (header, slot) = read_current_header_with_slot(&data).expect("corrupt A fallback");
-        assert_eq!((header.generation, slot), (4, HEADER_SLOT));
-
-        data[HEADER_SLOT] = b'X';
-        assert!(read_current_header_with_slot(&data).is_err());
-    }
-
-    fn convert_to_single_blob(path: &Path) {
-        let data = fs::read(path).expect("read page store");
-        let header = read_current_header(&data).expect("header");
-        let index_raw = read_index_raw(&data, &header).expect("materialize index");
-        let table_off = header.block_table_off as usize;
-        let block_count = header.block_count as usize;
-        let mut blocks = Vec::with_capacity(block_count);
-        for block_id in 0..block_count {
-            let entry = table_off + block_id * BLOCK_ENTRY;
-            let offset = read_u64(&data, entry) as usize;
-            let comp_len = read_u32(&data, entry + 8) as usize;
-            blocks.push(data[offset..offset + 16 + comp_len].to_vec());
-        }
-        let tail = data[header.tail_start as usize..].to_vec();
-        let compressed = zstd::bulk::compress(&index_raw, ZSTD_LEVEL).expect("compress index");
-        let block_table_off = DUAL_HEADER_LEN;
-        let index_off = align8(block_table_off + block_count * BLOCK_ENTRY);
-        let data_start = index_off + compressed.len();
-        let mut block_offsets = Vec::with_capacity(block_count);
-        let mut cursor = data_start;
-        for block in &blocks {
-            block_offsets.push(cursor);
-            cursor += block.len();
-        }
-        let header = Header {
-            created_at: header.created_at,
-            block_table_off: block_table_off as u64,
-            block_count: block_count as u64,
-            index_off: index_off as u64,
-            index_len: compressed.len() as u64,
-            index_raw_len: index_raw.len() as u64,
-            index_hash: xxh3_64(&index_raw),
-            data_start: data_start as u64,
-            tail_start: cursor as u64,
-            doc_count: header.doc_count,
-            generation: 1,
-            flags: HEADER_FLAG_DUAL,
-        };
-        let mut out = Vec::new();
-        out.extend_from_slice(&encode_header(&header));
-        out.extend_from_slice(&encode_header(&header));
-        for (block, offset) in blocks.iter().zip(block_offsets) {
-            let mut entry = [0u8; BLOCK_ENTRY];
-            write_u64(&mut entry, 0, offset as u64);
-            write_u32(&mut entry, 8, (block.len() - 16) as u32);
-            write_u32(&mut entry, 12, read_u32(block, 4));
-            write_u64(&mut entry, 16, read_u64(block, 8));
-            out.extend_from_slice(&entry);
-        }
-        out.extend_from_slice(&compressed);
-        for block in blocks {
-            out.extend_from_slice(&block);
-        }
-        out.extend_from_slice(&tail);
-        fs::write(path, out).expect("write single-blob store");
-    }
-
-    #[test]
-    fn opens_legacy_single_blob_index() {
-        let path = empty_indexed_store();
-        let first = new_memory(
-            "fact",
-            "test",
-            "first subject",
-            "first body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        let second = new_memory(
-            "fact",
-            "test",
-            "second subject",
-            "second body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
-        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
-        reindex_file(&path).expect("reindex");
-        convert_to_single_blob(&path);
-
-        let header = read_header_file(&path).expect("single-blob header");
-        assert_eq!(header.flags & HEADER_FLAG_PAGE_INDEX, 0);
-        let mut store = Store::open(&path).expect("open single blob");
-        assert_eq!(store.doc_count(), 2);
-        let memories = store.scan_page(usize::MAX, 0).expect("scan");
-        assert_eq!(memories.len(), 2);
-        assert_eq!(
-            store.find_doc(&first.id).expect("find").map(|(_, m)| m.id),
-            Some(first.id.clone())
-        );
-        assert_eq!(store.scope_id("test").expect("scope"), Some(0));
-        assert_eq!(
-            store
-                .bm25("first", None, None, None, None, 10)
-                .expect("bm25")
-                .len(),
-            1
-        );
-        assert_eq!(verify_full(&path).expect("verify"), 2);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn doc_meta_batch_matches_individual_reads() {
-        let path = empty_indexed_store();
-        for index in 0..300 {
-            let memory = new_memory(
-                "fact",
-                "test",
-                &format!("subject {index}"),
-                &format!("body {index}"),
-                "audit",
-                0.9,
-                Vec::new(),
-                None,
-                None,
-            );
-            append_record(&path, T_MEMORY, &memory_payload(&memory), true).expect("append");
-        }
-        reindex_file(&path).expect("reindex");
-        let store = Store::open(&path).expect("open");
-        let indices: Vec<u32> = (0..300).collect();
-        let batch = store.index().doc_meta_batch(&indices).expect("batch");
-        assert_eq!(batch.len(), indices.len());
-        for (idx, meta) in indices.iter().zip(batch) {
-            let single = store.doc_meta(*idx).expect("single");
-            assert_eq!(meta.block_id, single.block_id);
-            assert_eq!(meta.offset_in_block, single.offset_in_block);
-            assert_eq!(meta.record_len, single.record_len);
-            assert_eq!(meta.token_count, single.token_count);
-            assert_eq!(meta.scope_id, single.scope_id);
-            assert_eq!(meta.kind, single.kind);
-        }
-        cleanup(&path);
-    }
-
-    #[test]
-    fn reindex_preserves_merged_record_flag() {
-        let path = empty_indexed_store();
-        let first = new_memory(
-            "fact",
-            "test",
-            "first",
-            "first body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        let second = new_memory(
-            "fact",
-            "test",
-            "second",
-            "second body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
-        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
-        reindex_file(&path).expect("reindex sources");
-        let merged = build_merged(
-            &first,
-            &[first.id.clone(), second.id.clone()],
-            "merged body",
-            "manual",
-            1.0,
-        );
-        append_record(&path, T_MERGE, &memory_payload(&merged), true).expect("merge");
-        reindex_file(&path).expect("reindex merge");
-
-        let mut store = Store::open(&path).expect("open");
-        let memories = store.scan_page(usize::MAX, 0).expect("scan");
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].id, merged.id);
-        assert!(memories[0].merged);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn checkpoint_recovers_partial_index_append() {
-        let path = empty_indexed_store();
-        let memory = new_memory(
-            "fact",
-            "test",
-            "tail",
-            "tail body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        let payload = memory_payload(&memory);
-        append_record(&path, T_MEMORY, &payload, true).expect("append");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open partial marker");
-        file.write_all(INDEX_MARKER).expect("write partial marker");
-        file.sync_all().expect("sync partial marker");
-
-        let header = checkpoint_file(&path, true).expect("checkpoint repairs partial marker");
-        assert_eq!(header.doc_count, 0);
-        let data = fs::read(&path).expect("read repaired");
-        assert!(!data.windows(INDEX_MARKER.len()).any(|w| w == INDEX_MARKER));
-        assert_eq!(verify_full(&path).expect("verify repaired"), 1);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn records_appended_after_partial_index_are_readable_and_survive_checkpoint() {
-        let path = empty_indexed_store();
-        let first = new_memory(
-            "fact",
-            "test",
-            "first",
-            "first body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
-        let header = read_header_file(&path).expect("header");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open partial marker");
-        file.write_all(INDEX_MARKER).expect("write marker");
-        file.write_all(&(1024u64).to_le_bytes())
-            .expect("write partial index length");
-        file.write_all(b"partial index bytes")
-            .expect("write partial index");
-        file.sync_all().expect("sync partial index");
-        drop(file);
-        let second = new_memory(
-            "fact",
-            "test",
-            "second",
-            "second body",
-            "audit",
-            0.9,
-            Vec::new(),
-            None,
-            None,
-        );
-        append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
-
-        let data = fs::read(&path).expect("read store");
-        let tail = read_records_from(&data, header.tail_start as usize).expect("tail");
-        assert_eq!(
-            tail.len(),
-            2,
-            "records after a partial index must stay visible"
-        );
-        let store = Store::open(&path).expect("open store");
-        assert_eq!(store.tail_view().expect("tail view").memories.len(), 2);
-
-        let repaired = checkpoint_file(&path, true).expect("checkpoint repairs partial index");
-        assert_eq!(repaired.doc_count, 0);
-        assert_eq!(verify_full(&path).expect("verify repaired"), 2);
-        let data = fs::read(&path).expect("read repaired");
-        assert!(!data.windows(INDEX_MARKER.len()).any(|w| w == INDEX_MARKER));
-        cleanup(&path);
-    }
-
-    #[test]
-    fn records_after_short_partial_marker_prefix_are_recovered() {
-        for prefix_len in [1usize, 4, 8, 12] {
-            let path = empty_indexed_store();
-            let header = read_header_file(&path).expect("header");
-            let first = new_memory(
-                "fact",
-                "test",
-                "first",
-                "first body",
-                "audit",
-                0.9,
-                Vec::new(),
-                None,
-                None,
-            );
-            append_record(&path, T_MEMORY, &memory_payload(&first), true).expect("first");
-            let mut file = OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .expect("open partial marker");
-            let mut partial = INDEX_MARKER[..prefix_len.min(INDEX_MARKER.len())].to_vec();
-            partial.resize(prefix_len, 0);
-            file.write_all(&partial).expect("write marker prefix");
-            file.sync_all().expect("sync marker prefix");
-            drop(file);
-            let second = new_memory(
-                "fact",
-                "test",
-                "second",
-                "second body",
-                "audit",
-                0.9,
-                Vec::new(),
-                None,
-                None,
-            );
-            append_record(&path, T_MEMORY, &memory_payload(&second), true).expect("second");
-
-            let data = fs::read(&path).expect("read store");
-            let tail = read_records_from(&data, header.tail_start as usize).expect("tail");
-            assert_eq!(
-                tail.len(),
-                2,
-                "marker prefix length {prefix_len} must not hide later records"
-            );
-            let repaired = checkpoint_file(&path, true).expect("checkpoint repairs marker prefix");
-            assert_eq!(repaired.doc_count, 0);
-            assert_eq!(verify_full(&path).expect("verify repaired"), 2);
-            cleanup(&path);
-        }
-    }
-
-    #[test]
-    fn checkpoint_rejects_truncated_or_garbage_tail() {
-        let path = empty_indexed_store();
-        append_record(&path, T_MEMORY, b"payload", true).expect("append");
-        let len = fs::metadata(&path).expect("metadata").len();
-        OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .expect("open truncated")
-            .set_len(len - 1)
-            .expect("truncate");
-        let before = fs::read(&path).expect("read before");
-        let error = checkpoint_file(&path, false).expect_err("truncated tail must fail");
-        assert!(format!("{error:#}").contains("truncated"), "{error:#}");
-        assert_eq!(fs::read(&path).expect("read after"), before);
-        assert!(!path.with_file_name("cm.tmp").exists());
-
-        let garbage_path = empty_indexed_store();
-        append_record(&garbage_path, T_MEMORY, b"payload", true).expect("append");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&garbage_path)
-            .expect("open for garbage");
-        file.write_all(b"garbage!").expect("write garbage");
-        file.sync_all().expect("sync garbage");
-        let error = checkpoint_file(&garbage_path, false).expect_err("garbage tail must fail");
-        assert!(format!("{error:#}").contains("offset"), "{error:#}");
-        assert!(!garbage_path.with_file_name("cm.tmp").exists());
-        cleanup(&path);
-        cleanup(&garbage_path);
-    }
 }

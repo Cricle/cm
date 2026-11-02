@@ -16,12 +16,12 @@ const PROFILE_START: &str = "# >>> cm-memory >>>";
 #[cfg(not(windows))]
 const PROFILE_END: &str = "# <<< cm-memory <<<";
 
-struct AgentSpec {
-    id: &'static str,
-    path: &'static str,
+pub(crate) struct AgentSpec {
+    pub(crate) id: &'static str,
+    pub(crate) path: &'static str,
 }
 
-const AGENTS: &[AgentSpec] = &[
+pub(crate) const AGENTS: &[AgentSpec] = &[
     AgentSpec {
         id: "claude",
         path: ".claude/skills",
@@ -149,7 +149,7 @@ struct SkillRecord {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ExeRecord {
+pub(crate) struct ExeRecord {
     path: String,
     source: String,
     kind: String,
@@ -161,13 +161,13 @@ struct ExeRecord {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct Manifest {
+pub(crate) struct Manifest {
     #[serde(default)]
     version: u32,
     #[serde(default)]
     skills: Vec<SkillRecord>,
     #[serde(default)]
-    exe: Option<ExeRecord>,
+    pub(crate) exe: Option<ExeRecord>,
 }
 
 pub(crate) fn cmd_install(args: &[String], skill: &str) -> Result<()> {
@@ -593,7 +593,7 @@ fn home_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("{key} is not set"))
 }
 
-fn skill_path(home: &Path, spec: &AgentSpec) -> PathBuf {
+pub(crate) fn skill_path(home: &Path, spec: &AgentSpec) -> PathBuf {
     home.join(spec.path).join("cm-memory").join("SKILL.md")
 }
 
@@ -624,7 +624,7 @@ fn prepare_backup(home: &Path, path: &Path, expected: &[u8], name: &str) -> Resu
     Ok(Some(backup.display().to_string()))
 }
 
-fn load_manifest(home: &Path) -> Result<Manifest> {
+pub(crate) fn load_manifest(home: &Path) -> Result<Manifest> {
     let path = manifest_path(home);
     if !path.exists() {
         return Ok(Manifest {
@@ -729,84 +729,4 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_paths_are_unique() {
-        let mut ids = std::collections::HashSet::new();
-        let mut paths = std::collections::HashSet::new();
-        for spec in AGENTS {
-            assert!(ids.insert(spec.id));
-            assert!(paths.insert(spec.path));
-        }
-    }
-
-    #[test]
-    fn installs_and_removes_exe_in_temp_home() {
-        let home = std::env::temp_dir().join(format!("cm-install-test-{}", crate::model::new_id()));
-        fs::create_dir_all(&home).unwrap();
-        let args = vec![
-            "install".to_string(),
-            "--home".to_string(),
-            home.display().to_string(),
-            "--agent".to_string(),
-            "claude".to_string(),
-            "--no-path".to_string(),
-        ];
-        cmd_install(&args, "test skill").unwrap();
-        let exe = home
-            .join(".local")
-            .join("bin")
-            .join(if cfg!(windows) { "cm.exe" } else { "cm" });
-        assert!(exe.exists());
-        let manifest = load_manifest(&home).unwrap();
-        assert!(manifest.exe.is_some());
-        cmd_uninstall(
-            &[
-                "uninstall".to_string(),
-                "--home".to_string(),
-                home.display().to_string(),
-                "--all".to_string(),
-            ],
-            "test skill",
-        )
-        .unwrap();
-        assert!(!exe.exists());
-        fs::remove_dir_all(&home).ok();
-    }
-
-    #[test]
-    fn installs_and_removes_skill_in_temp_home() {
-        let home = std::env::temp_dir().join(format!("cm-install-test-{}", crate::model::new_id()));
-        fs::create_dir_all(&home).unwrap();
-        let skill = "test skill";
-        let args = vec![
-            "install".to_string(),
-            "--home".to_string(),
-            home.display().to_string(),
-            "--agent".to_string(),
-            "claude".to_string(),
-            "--no-exe".to_string(),
-        ];
-        cmd_install(&args, skill).unwrap();
-        let path = skill_path(&home, AGENTS.iter().find(|s| s.id == "claude").unwrap());
-        assert_eq!(fs::read_to_string(&path).unwrap(), skill);
-        cmd_uninstall(
-            &[
-                "uninstall".to_string(),
-                "--home".to_string(),
-                home.display().to_string(),
-                "--agent".to_string(),
-                "claude".to_string(),
-            ],
-            skill,
-        )
-        .unwrap();
-        assert!(!path.exists());
-        fs::remove_dir_all(&home).ok();
-    }
 }

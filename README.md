@@ -54,7 +54,7 @@ remains the project-local installation path.
 
 ```text
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
-cm recall --file cm --query "<task>" [--scope <scope>] [--budget 800] [--full]
+cm recall --file cm --query "<task>" [--scope <scope>] [--task <task>] [--budget 800] [--full]
 cm forget --file cm --id <id>
 cm status [--file cm]
 cm doctor [--strict] [--file cm]
@@ -64,6 +64,11 @@ cm skill [--json] [--install] [--check]
 `recall` returns at most 3 memories and respects the token budget. The first hit is
 full text; additional hits are query-focused snippets, so 2–3 related memories
 usually fit in 800 tokens. Use `--full` for complete text on every hit.
+
+`--task` is optional and affects only the disposable cache, never ranking. Pass a
+stable id for the current work item (branch, issue, or agent task) so `cm.cache`
+keeps the blocks read by this task; `--scope` remains the durable workspace
+affinity. Result blocks are prefetched into that working set after a query.
 
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
@@ -86,8 +91,8 @@ cm checkpoint [--in-place] [--file cm]
 cm reindex [--file cm]
 cm get --file cm --id <id>
 cm scan [--file cm] [--limit 100] [--offset 0]
-cm search --file cm --query <text> [--top 8] [--scope <scope>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
-cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
+cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
+cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
 cm consolidate --file cm [--apply] [--top 8] [--limit 50] [--offset 0] [--threshold 0.85]
@@ -185,6 +190,7 @@ regression checks, not as a general accuracy claim.
 - Header version byte remains `1`.
 - No SQLite or external database.
 - Hot ops use mmap and a bounded block cache with TinyLFU admission/aging; eviction is frequency-first with recency only as a tie-break, so one-off scans do not evict repeatedly reused blocks.
+- Cache entries carry scope and task affinity tags. Eviction protects the current task first, then the current workspace; query result blocks are prefetched and tagged. This is a single-workspace working-set accelerator, not a global knowledge cache.
 
 ### Compact schema and size
 

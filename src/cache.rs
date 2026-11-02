@@ -11,9 +11,10 @@ use crate::model::now_ms;
 
 const CACHE_MAGIC: &[u8; 4] = b"CMLU";
 const CACHE_VERSION: u8 = 1;
+const CACHE_LAYOUT: u8 = 2;
 const CACHE_HEADER: usize = 64;
-const HOT_BUDGET: usize = 8 * 1024 * 1024;
-const SLOT_SIZE: usize = 64 * 1024;
+pub(crate) const HOT_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SLOT_SIZE: usize = 64 * 1024;
 const ENTRY_SIZE: usize = 32;
 const MAX_ENTRIES: usize = 1024;
 const SKETCH_ROWS: usize = 4;
@@ -49,6 +50,8 @@ impl CacheData {
 pub(crate) struct Cache {
     data: CacheData,
     header: CacheHeader,
+    active_scope_tag: u32,
+    active_task_tag: u32,
 }
 
 impl Cache {
@@ -70,6 +73,8 @@ impl Cache {
             Some(Self {
                 data: CacheData::Mmap(mmap),
                 header,
+                active_scope_tag: 0,
+                active_task_tag: 0,
             })
         } else {
             None
@@ -135,6 +140,8 @@ impl Cache {
         Ok(Self {
             data: CacheData::Mmap(mmap),
             header,
+            active_scope_tag: 0,
+            active_task_tag: 0,
         })
     }
 
@@ -158,7 +165,18 @@ impl Cache {
         Ok(Self {
             data: CacheData::Memory(data),
             header,
+            active_scope_tag: 0,
+            active_task_tag: 0,
         })
+    }
+
+    /// Scope/task affinity for blocks touched by the current query. Scope is
+    /// the durable working set (one coding workspace); task is the ephemeral
+    /// working set inside that workspace. Scope survives task switches when
+    /// the cache has room; a new task takes eviction priority under pressure.
+    pub(crate) fn set_affinity(&mut self, scope: Option<&str>, task: Option<&str>) {
+        self.active_scope_tag = affinity_tag(scope);
+        self.active_task_tag = affinity_tag(task);
     }
 
     pub(crate) fn get_block<F>(&mut self, block_id: u32, decompress: F) -> Result<Vec<u8>>
@@ -169,6 +187,16 @@ impl Cache {
         let cap = self.header.table_cap as usize;
         let data_off = self.header.data_off as usize;
         let sketch_off = self.header.sketch_off as usize;
+        let active_scope_tag = self.active_scope_tag;
+        let active_task_tag = self.active_task_tag;
+        let affinity_enabled = active_scope_tag != 0 || active_task_tag != 0;
+        let candidate_rank = if active_task_tag != 0 {
+            3
+        } else if active_scope_tag != 0 {
+            2
+        } else {
+            1
+        };
         let data = self.data.as_mut_slice();
         for i in 0..cap {
             let offset = table_start + i * ENTRY_SIZE;
@@ -181,6 +209,10 @@ impl Cache {
                     let hits = read_u32(data, offset + 4).saturating_add(1);
                     write_u32(data, offset + 4, hits);
                     write_u64(data, offset + 8, now_ms());
+                    if affinity_enabled {
+                        write_u32(data, offset + 24, active_scope_tag);
+                        write_u32(data, offset + 28, active_task_tag);
+                    }
                     sketch_bump(data, sketch_off, block_id);
                     return Ok(block);
                 }
@@ -193,6 +225,7 @@ impl Cache {
         }
         sketch_bump(data, sketch_off, block_id);
         let mut victim = 0usize;
+        let mut victim_rank = u8::MAX;
         let mut victim_hits = u32::MAX;
         let mut victim_time = u64::MAX;
         for i in 0..cap {
@@ -202,10 +235,20 @@ impl Cache {
                 victim = i;
                 break;
             }
+            let rank = rank_for(
+                active_scope_tag,
+                active_task_tag,
+                read_u32(data, offset + 24),
+                read_u32(data, offset + 28),
+            );
             let hits = read_u32(data, offset + 4);
             let last = read_u64(data, offset + 8);
-            if hits < victim_hits || (hits == victim_hits && last < victim_time) {
+            if rank < victim_rank
+                || (rank == victim_rank
+                    && (hits < victim_hits || (hits == victim_hits && last < victim_time)))
+            {
                 victim = i;
+                victim_rank = rank;
                 victim_hits = hits;
                 victim_time = last;
             }
@@ -216,9 +259,12 @@ impl Cache {
             let victim_id = read_u32(data, victim_offset);
             let candidate_freq = sketch_estimate(data, sketch_off, block_id);
             let victim_freq = sketch_estimate(data, sketch_off, victim_id);
-            if victim_freq >= candidate_freq {
-                // TinyLFU admission: a one-off scan must not evict a
-                // repeatedly reused block.
+            let protects_working_set = affinity_enabled && victim_rank > candidate_rank;
+            if protects_working_set
+                || (victim_rank == candidate_rank && victim_freq >= candidate_freq)
+            {
+                // TinyLFU admission plus scope/task affinity: one-off scans
+                // and other projects must not evict the current working set.
                 return Ok(block);
             }
         }
@@ -230,6 +276,13 @@ impl Cache {
         write_u64(data, victim_offset + 8, now_ms());
         write_u32(data, victim_offset + 16, slot);
         write_u32(data, victim_offset + 20, block.len() as u32);
+        if affinity_enabled {
+            write_u32(data, victim_offset + 24, active_scope_tag);
+            write_u32(data, victim_offset + 28, active_task_tag);
+        } else {
+            write_u32(data, victim_offset + 24, 0);
+            write_u32(data, victim_offset + 28, 0);
+        }
         Ok(block)
     }
 }
@@ -251,7 +304,7 @@ fn temp_cache_path(path: &Path) -> PathBuf {
     ))
 }
 
-fn layout() -> Result<(usize, usize, usize, usize, usize, usize)> {
+pub(crate) fn layout() -> Result<(usize, usize, usize, usize, usize, usize)> {
     // The block cache is deliberately fixed at the hot budget; the index is
     // no longer copied here.
     let size = HOT_BUDGET;
@@ -285,6 +338,7 @@ fn encode_header(header: &CacheHeader) -> [u8; CACHE_HEADER] {
     let mut bytes = [0u8; CACHE_HEADER];
     bytes[0..4].copy_from_slice(CACHE_MAGIC);
     bytes[4] = CACHE_VERSION;
+    bytes[5] = CACHE_LAYOUT;
     bytes[6..8].copy_from_slice(&(CACHE_HEADER as u16).to_le_bytes());
     bytes[8..16].copy_from_slice(&header.index_hash.to_le_bytes());
     bytes[16..24].copy_from_slice(&header.index_len.to_le_bytes());
@@ -303,6 +357,7 @@ fn decode_header(mmap: &[u8]) -> Option<CacheHeader> {
     if mmap.len() < CACHE_HEADER
         || &mmap[0..4] != CACHE_MAGIC
         || mmap[4] != CACHE_VERSION
+        || mmap[5] != CACHE_LAYOUT
         || xxh3_64(&mmap[0..56]) != u64::from_le_bytes(mmap[56..64].try_into().ok()?)
     {
         return None;
@@ -350,6 +405,36 @@ fn sketch_estimate(data: &[u8], sketch_off: usize, block_id: u32) -> u8 {
 fn align8(value: usize) -> usize {
     (value + 7) & !7
 }
+
+pub(crate) fn affinity_tag(value: Option<&str>) -> u32 {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return 0;
+    };
+    let tag = xxh3_64(value.as_bytes()) as u32;
+    if tag == 0 {
+        1
+    } else {
+        tag
+    }
+}
+
+fn rank_for(active_scope: u32, active_task: u32, scope_tag: u32, task_tag: u32) -> u8 {
+    if active_scope == 0 && active_task == 0 {
+        return 1;
+    }
+    if active_task != 0
+        && task_tag == active_task
+        && (active_scope == 0 || scope_tag == active_scope)
+    {
+        3
+    } else if active_scope != 0 && scope_tag == active_scope {
+        2
+    } else if scope_tag == 0 && task_tag == 0 {
+        0
+    } else {
+        1
+    }
+}
 fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
@@ -361,72 +446,4 @@ fn write_u32(data: &mut [u8], offset: usize, value: u32) {
 }
 fn write_u64(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tinylfu_rejects_scan_pollution() {
-        let dir = std::env::temp_dir().join(format!("cm-cache-test-{}", crate::model::new_id()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        let store = dir.join("cm");
-        let (_, _, cap, _, _, _) = layout().expect("layout");
-        let mut cache = Cache::create(&store, 7).expect("create cache");
-        for id in 1..=cap as u32 {
-            for _ in 0..2 {
-                cache
-                    .get_block(id, || Ok(vec![id as u8; 1024]))
-                    .expect("fill hot");
-            }
-        }
-        for id in 0..cap * 4 {
-            cache
-                .get_block(20_000 + id as u32, || Ok(vec![(id % 250) as u8; 1024]))
-                .expect("scan");
-        }
-        let hot = cache
-            .get_block(1, || panic!("hot block was evicted"))
-            .expect("hot hit");
-        assert_eq!(hot[0], 1);
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn layout_uses_all_hot_slots() {
-        let (size, _table_off, cap, data_off, slots, sketch_off) = layout().expect("layout");
-        assert_eq!(size, HOT_BUDGET);
-        assert_eq!(cap, slots);
-        assert!(sketch_off < data_off);
-        assert!(data_off + slots * SLOT_SIZE <= size);
-    }
-
-    #[test]
-    fn cache_create_reopen_and_memory_fallback() {
-        let dir = std::env::temp_dir().join(format!("cm-cache-test-{}", crate::model::new_id()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        let store = dir.join("cm");
-        let mut cache = Cache::create(&store, 42).expect("create cache");
-        let block = cache
-            .get_block(7, || Ok(vec![7u8; 1024]))
-            .expect("fill block");
-        assert_eq!(block.len(), 1024);
-        drop(cache);
-
-        let mut reopened = Cache::open_existing(&store, 42).expect("reopen cache");
-        let block = reopened
-            .get_block(7, || panic!("block cache did not persist"))
-            .expect("cached block");
-        assert_eq!(block[0], 7);
-        assert!(Cache::open_existing(&store, 43).is_none());
-        drop(reopened);
-
-        let mut memory = Cache::memory(42).expect("memory cache");
-        let block = memory
-            .get_block(9, || Ok(vec![9u8; 512]))
-            .expect("memory block");
-        assert_eq!(block[0], 9);
-        fs::remove_dir_all(&dir).ok();
-    }
 }
