@@ -199,17 +199,23 @@ frame. The treatment store contained the 20 re-anchored compaction memories; the
 control store contained only the frame. No brief was pre-injected into either
 task: both agents had to call `cm brief` or `cm recall` themselves.
 
-| Mode | Tokens | Tool uses | Wall time | Files read |
-|---|---:|---:|---:|---:|
-| with cm memory | 182,491 | 13 | 402.9s | 2 |
-| without cm memory | 890,034 | 28 | 836.9s | 4 |
+Three paired runs on the same task:
 
-That is **-79.5% tokens**, **-53.6% tool uses**, **-51.9% wall time**, and
-**-50% files read** in this run. Both answers were source-correct in spot review
-against `findValidCutPoints` (line 394), `findCutPoint` (446), `compact` (952),
-and `tokensBefore` (884). The control spent 13.9 minutes on repository
-discovery. Single-run variance is still high, so treat the gap as directional.
-Raw metrics: `eval/results/pi-equal-tools-ab.json`.
+| Run | Mode | Tokens | Tool uses | Wall time |
+|---|---|---:|---:|---:|
+| 1 | with cm memory | 182,491 | 13 | 402.9s |
+| 1 | without cm memory | 890,034 | 28 | 836.9s |
+| 2 | with cm memory | 419,809 | 14 | 284.0s |
+| 2 | without cm memory | 727,137 | 39 | 333.3s |
+| 3 | with cm memory | 305,238 | 18 | 371.6s |
+| 3 | without cm memory | 535,085 | 22 | 442.4s |
+
+Aggregate across the three pairs: **-57.8% tokens**, **-49.4% tool uses**, and
+**-34.4% wall time** (`907,538` vs `2,152,256` tokens). Per-run token reductions
+were 79.5%, 42.3%, and 43.0%; the spread is real, so the aggregate is more
+honest than any single run. All six answers were source-correct in spot review
+against `findValidCutPoints` (394), `findCutPoint` (446), `compact` (952), and
+`tokensBefore` (884). Raw metrics: `eval/results/pi-equal-tools-ab.json`.
 
 ## What not to claim
 

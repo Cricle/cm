@@ -559,6 +559,7 @@ fn print_usage() {
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items 8] [--root <dir>] [--format prompt|json]
+         cm explore --apply result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
          cm absorb --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm claim --task <id>|current --owner <id> [--lease 30]
@@ -1685,11 +1686,17 @@ fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
     if source.is_empty() || source.starts_with("agent:") || source.contains("://") {
         return None;
     }
-    if let Some((path, symbol)) = source.rsplit_once(':') {
-        if path.len() > 1
-            && !symbol.is_empty()
-            && (path.contains('/') || path.contains('\\') || path.contains('.'))
-        {
+    if let Some(index) = source.char_indices().find_map(|(index, ch)| {
+        if ch != ':' {
+            return None;
+        }
+        let left = &source[..index];
+        (left.len() > 1 && (left.contains('/') || left.contains('\\') || left.contains('.')))
+            .then_some(index)
+    }) {
+        let path = &source[..index];
+        let symbol = &source[index + 1..];
+        if !symbol.is_empty() {
             return Some((PathBuf::from(path), Some(symbol.to_string())));
         }
     }
@@ -1719,6 +1726,22 @@ fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
 }
 
 fn find_symbol_line(lines: &[&str], symbol: &str) -> Option<usize> {
+    let mut names = vec![symbol];
+    if let Some(last) = symbol.rsplit("::").next().filter(|last| *last != symbol) {
+        names.push(last);
+    }
+    if let Some(last) = symbol.rsplit('.').next().filter(|last| *last != symbol) {
+        names.push(last);
+    }
+    for name in names {
+        if let Some(index) = find_symbol_line_exact(lines, name) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn find_symbol_line_exact(lines: &[&str], symbol: &str) -> Option<usize> {
     const KEYWORDS: &[&str] = &[
         "fn",
         "function",
@@ -1876,7 +1899,17 @@ fn audit_source_issue(
         Err(_) => return Some("unreadable_source"),
     };
     if let Some(symbol) = symbol {
-        if !text.contains(symbol) {
+        let mut present = text.contains(symbol);
+        for separator in ["::", "."] {
+            if let Some(last) = symbol
+                .rsplit(separator)
+                .next()
+                .filter(|last| *last != symbol)
+            {
+                present = present || text.contains(last);
+            }
+        }
+        if !present {
             return Some("missing_symbol");
         }
     }
@@ -2936,6 +2969,15 @@ fn build_explore_prompt(input: ExplorePromptInput<'_>) -> String {
 }
 
 fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
+    if let Some(input) = arg_value(args, "--apply") {
+        let mut forwarded = vec!["--input".to_string(), input];
+        for flag in ["--dry-run", "--replace", "--allow-long-text"] {
+            if has_flag(args, flag) {
+                forwarded.push(flag.to_string());
+            }
+        }
+        return cmd_absorb(path, &forwarded);
+    }
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     if !root.is_dir() {
         bail!("explore root is not a directory: {}", root.display());

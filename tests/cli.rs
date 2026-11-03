@@ -393,6 +393,31 @@ fn explore_macro_prompt_for_first_run() {
     assert!(prompt.contains("path:symbol"), "{prompt}");
     assert!(prompt.contains("Cargo.toml"), "{prompt}");
     assert!(prompt.contains("OUTPUT"), "{prompt}");
+    let evidence = report["evidence_id"].as_str().unwrap();
+    assert!(!evidence.is_empty());
+    let result_path = dir.join("explore-result.jsonl");
+    fs::write(
+        &result_path,
+        format!(
+            "{{\"op\":\"remember\",\"kind\":\"fact\",\"scope\":\"repo\",\"subject\":\"entry\",\"text\":\"main is the executable entry\",\"source\":\"src/main.rs:main\",\"evidence\":[\"{evidence}\"]}}\n"
+        ),
+    )
+    .expect("write explore result");
+    let applied = run(
+        &repo,
+        &[
+            "explore",
+            "--file",
+            file_arg,
+            "--apply",
+            result_path.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    assert_ok(&applied);
+    let report: serde_json::Value = serde_json::from_slice(&applied.stdout).expect("apply json");
+    assert_eq!(report["accepted"], 1);
+    assert_eq!(report["written"], 1);
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1842,6 +1867,48 @@ fn symbol_anchor_skips_comments_and_snippet_starts_at_definition() {
         "{output}"
     );
     assert!(!output.contains("snippet:\n// compact()"), "{output}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn symbol_anchor_accepts_type_method_notation() {
+    let dir = temp_dir("symbol-qualified");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(
+        dir.join("src").join("lib.rs"),
+        "pub struct Worker;\n\nimpl Worker {\n    pub fn run(&self) {}\n}\n",
+    )
+    .expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "worker run",
+            "--text",
+            "Worker::run is the entry method",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:Worker::run",
+            "--verify-source",
+        ],
+    );
+    assert_ok(&remembered);
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    let output = String::from_utf8_lossy(&scan.stdout);
+    assert!(output.contains("Worker::run"));
+    let audit = run(
+        &dir,
+        &["audit", "--file", file_arg, "--root", ".", "--strict"],
+    );
+    assert_ok(&audit);
     fs::remove_dir_all(&dir).ok();
 }
 

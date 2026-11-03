@@ -119,9 +119,11 @@ supersede stale memories. `auto` chooses macro for an empty store and micro when
 changes, task touches, or an explicit query exist. The prompt carries a frame
 `EVIDENCE_ID` and the absorb JSONL contract, so the same `cm absorb` command
 writes the result. Prefer `--max-items 8` or fewer; the prompt explicitly allows
-an empty result. `explore` is a guide, not an autonomous crawler: it reports
-paths and candidate targets, while the model reads the chosen files and `absorb`
-still validates every source and evidence ID.
+an empty result. `explore --apply result.jsonl` is the shorthand for the
+`absorb` step, including `--dry-run`, `--replace`, and `--allow-long-text`.
+`explore` is a guide, not an autonomous crawler: it reports paths and candidate
+targets, while the model reads the chosen files and `absorb` still validates
+every source and evidence ID.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
@@ -180,6 +182,7 @@ cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
 cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items 8] [--root <dir>] [--format prompt|json] [--file cm]
+cm explore --apply result.jsonl [--dry-run] [--replace] [--allow-long-text] [--file cm]
 cm pack --file cm [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 8] [--query <text>]
 cm absorb --file cm --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]

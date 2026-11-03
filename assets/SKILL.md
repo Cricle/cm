@@ -116,8 +116,8 @@ guided exploration prompt instead of wandering:
 ```bash
 $CM explore --file "$F" --root . --mode auto --max-items 8 > explore.prompt
 # send explore.prompt to the model, save strict JSONL as result.jsonl
-$CM absorb --file "$F" --input result.jsonl --dry-run
-$CM absorb --file "$F" --input result.jsonl --replace
+$CM explore --file "$F" --apply result.jsonl --dry-run
+$CM explore --file "$F" --apply result.jsonl --replace
 ```
 
 `macro` covers manifests, entry points, module boundaries, build/test paths, and

@@ -3,17 +3,33 @@
   "repo": "C:\\wp\\empty\\pi",
   "task": "Explain pi compaction: findCutPoint oversized user spans, compact summary merge, and context token estimation",
   "setup": "Two fresh clones of pi HEAD with identical tracked files. Both agents received exactly the same task text and the same cm binary/instructions. Both stores had an active fair-pi frame; the treatment store had 20 user memories plus 4 frames, the control store had only the frame. No brief was pre-injected; agents had to call cm themselves.",
-  "with_cm": {
-    "tokens": 182491,
-    "tool_uses": 13,
-    "duration_ms": 402851,
-    "files_read": 2
+  "runs": [
+    {
+      "run": 1,
+      "with_cm": {"tokens": 182491, "tool_uses": 13, "duration_ms": 402851, "files_read": 2},
+      "without_cm": {"tokens": 890034, "tool_uses": 28, "duration_ms": 836898, "files_read": 4}
+    },
+    {
+      "run": 2,
+      "with_cm": {"tokens": 419809, "tool_uses": 14, "duration_ms": 283968},
+      "without_cm": {"tokens": 727137, "tool_uses": 39, "duration_ms": 333336}
+    },
+    {
+      "run": 3,
+      "with_cm": {"tokens": 305238, "tool_uses": 18, "duration_ms": 371641},
+      "without_cm": {"tokens": 535085, "tool_uses": 22, "duration_ms": 442392}
+    }
+  ],
+  "aggregate": {
+    "with_cm_tokens": 907538,
+    "without_cm_tokens": 2152256,
+    "token_reduction_percent": 57.8,
+    "with_cm_tool_uses": 45,
+    "without_cm_tool_uses": 89,
+    "tool_reduction_percent": 49.4,
+    "with_cm_duration_ms": 1058460,
+    "without_cm_duration_ms": 1612626,
+    "time_reduction_percent": 34.4
   },
-  "without_cm": {
-    "tokens": 890034,
-    "tool_uses": 28,
-    "duration_ms": 836898,
-    "files_read": 4
-  },
-  "notes": "Equal-tools single run: same prompt, same model, same repo commit, same cm binary. Only the memory store contents differed. Both answers were source-correct in spot review against findValidCutPoints (394), findCutPoint (446), compact (952), and tokensBefore (884). Treat the gap as directional because single-run variance is high."
+  "notes": "Equal-tools runs: same prompt, model, repo commit, cm binary, and tool access. Only memory store contents differed. All six answers were source-correct in spot review against findValidCutPoints (394), findCutPoint (446), compact (952), and tokensBefore (884)."
 }
