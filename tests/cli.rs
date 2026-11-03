@@ -1437,6 +1437,8 @@ fn default_memory_file_is_discovered_from_subdirectory() {
     let file = dir.join("cm");
     let file_arg = file.to_str().unwrap();
     assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    fs::create_dir_all(dir.join("src")).expect("create root src");
+    fs::write(dir.join("src").join("root.rs"), "pub fn root() {}\n").expect("write root source");
     let nested = dir.join("nested").join("src");
     fs::create_dir_all(&nested).expect("create nested dirs");
 
@@ -1444,6 +1446,27 @@ fn default_memory_file_is_discovered_from_subdirectory() {
     assert_ok(&status);
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
     assert_eq!(status["active_total"], 0);
+
+    let remembered = run(
+        &nested,
+        &[
+            "remember",
+            "--subject",
+            "root function",
+            "--text",
+            "The root function exists",
+            "--scope",
+            "repo",
+            "--source",
+            "src/root.rs:root",
+            "--verify-source",
+        ],
+    );
+    assert_ok(&remembered);
+    let status = run(&nested, &["status"]);
+    assert_ok(&status);
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
+    assert_eq!(status["active_total"], 1);
 
     let init = run(&nested, &["init"]);
     assert_ok(&init);

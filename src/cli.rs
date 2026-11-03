@@ -1754,9 +1754,19 @@ fn find_symbol_line(lines: &[&str], symbol: &str) -> Option<usize> {
 
 fn source_anchor(source: &str) -> Option<(u32, String)> {
     let (relative, symbol) = source_parts(source)?;
-    let root = std::env::current_dir().ok()?;
-    let text = fs::read_to_string(root.join(relative)).ok()?;
-    anchor_text(&text, symbol.as_deref())
+    let cwd = std::env::current_dir().ok()?;
+    let mut bases = vec![cwd.clone()];
+    let mut current = cwd.as_path();
+    while let Some(parent) = current.parent() {
+        bases.push(parent.to_path_buf());
+        current = parent;
+    }
+    for base in bases {
+        if let Ok(text) = fs::read_to_string(base.join(&relative)) {
+            return anchor_text(&text, symbol.as_deref());
+        }
+    }
+    None
 }
 
 fn source_snippet(memory: &crate::model::Memory, root: &Path, lines: usize) -> Option<String> {

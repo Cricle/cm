@@ -75,7 +75,9 @@ usually fit in 800 tokens. Use `--full` for complete text on every hit.
 
 When `--file` is omitted, existing-store commands use `./cm` or the nearest
 ancestor `cm`; this lets agents run from a subdirectory. `cm init` creates the
-local default and does not claim an ancestor file.
+local default and does not claim an ancestor file. Source paths for
+`--verify-source` are also resolved from the current directory outward, so a
+repo-root-relative `path:symbol` still anchors when the agent is in a subdir.
 
 `--task` is optional and affects only the disposable cache, never ranking. Pass a
 stable id for the current work item (branch, issue, or agent task) so `cm.cache`

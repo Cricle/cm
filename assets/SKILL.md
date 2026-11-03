@@ -22,7 +22,8 @@ F=<path/to/cm>   # memory file, not necessarily cwd/cm
 
 If `--file` is omitted, existing-store commands use `./cm` or the nearest
 ancestor `cm`. `cm init` creates the local default and does not claim an
-ancestor.
+ancestor. Source paths are resolved from the current directory outward, so a
+repo-root-relative `path:symbol` still anchors from a subdirectory.
 
 If this skill is unavailable, run `cm skill` or `cm skill --install`.
 
