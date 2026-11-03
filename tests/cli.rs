@@ -1545,6 +1545,22 @@ fn brief_inlines_source_snippet() {
             "src/foo.rs:hello",
         ],
     ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello caller",
+            "--text",
+            "hello is called by the entry point",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
     let root_arg = dir.to_str().unwrap();
     let brief = run(
         &dir,
@@ -1568,6 +1584,11 @@ fn brief_inlines_source_snippet() {
     let output = String::from_utf8_lossy(&brief.stdout);
     assert!(output.contains("snippet:"), "{output}");
     assert!(output.contains("pub fn hello()"), "{output}");
+    assert_eq!(
+        output.matches("pub fn hello()").count(),
+        1,
+        "same source snippet must appear once: {output}"
+    );
     fs::remove_dir_all(&dir).ok();
 }
 

@@ -2416,8 +2416,12 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     });
     let mut memories: Vec<BriefMemory> = selected.iter().map(BriefMemory::from).collect();
     if snippet_lines > 0 {
+        let mut seen = std::collections::HashSet::new();
         for (memory, brief) in selected.iter().zip(memories.iter_mut()) {
-            brief.snippet = source_snippet(memory, &root, snippet_lines);
+            let key = format!("{}\0{}", memory.source, memory.source_line.unwrap_or(0));
+            if seen.insert(key) {
+                brief.snippet = source_snippet(memory, &root, snippet_lines);
+            }
         }
     }
     let mut memory_tokens = json_tokens(&memories)?;
@@ -2580,12 +2584,16 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
             .get(&memory.id)
             .is_none_or(|stats| !(stats.wrong >= 2 || (stats.stale >= 2 && stats.useful == 0)))
     });
+    let mut seen_sources = std::collections::HashSet::new();
     let memories: Vec<PackMemory> = selected
         .iter()
         .map(|memory| {
             let mut pack = PackMemory::from(memory);
             if snippet_lines > 0 {
-                pack.snippet = source_snippet(memory, &root, snippet_lines);
+                let key = format!("{}\0{}", memory.source, memory.source_line.unwrap_or(0));
+                if seen_sources.insert(key) {
+                    pack.snippet = source_snippet(memory, &root, snippet_lines);
+                }
             }
             pack
         })
