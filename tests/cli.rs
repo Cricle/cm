@@ -362,6 +362,106 @@ fn audit_strict_fails_until_issues_are_refreshed() {
 }
 
 #[test]
+fn explore_macro_prompt_for_first_run() {
+    let dir = temp_dir("explore-macro");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("src")).expect("create repo");
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("manifest");
+    fs::write(
+        repo.join("src").join("main.rs"),
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    )
+    .expect("entry");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let repo_arg = repo.to_str().unwrap();
+    let result = run(
+        &dir,
+        &[
+            "explore", "--file", file_arg, "--root", repo_arg, "--mode", "auto", "--format", "json",
+        ],
+    );
+    assert_ok(&result);
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
+    assert_eq!(report["mode"], "macro");
+    assert_eq!(report["memories"]["active"], 0);
+    assert!(!report["evidence_id"].as_str().unwrap_or("").is_empty());
+    let prompt = report["prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("MODE: macro"), "{prompt}");
+    assert!(prompt.contains("EVIDENCE_ID:"), "{prompt}");
+    assert!(prompt.contains("path:symbol"), "{prompt}");
+    assert!(prompt.contains("Cargo.toml"), "{prompt}");
+    assert!(prompt.contains("OUTPUT"), "{prompt}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn explore_micro_lists_existing_memories_and_sources() {
+    let dir = temp_dir("explore-micro");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("src")).expect("create repo");
+    fs::write(
+        repo.join("src").join("foo.rs"),
+        "pub fn hello() {\n    println!(\"hi\");\n}\n",
+    )
+    .expect("source");
+    assert_ok(&run(&repo, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &repo,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello",
+            "--text",
+            "hello prints hi",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    );
+    assert_ok(&remembered);
+    let memory_id = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let result = run(
+        &repo,
+        &[
+            "explore",
+            "--file",
+            file_arg,
+            "--root",
+            ".",
+            "--mode",
+            "auto",
+            "--query",
+            "hello implementation",
+            "--format",
+            "json",
+        ],
+    );
+    assert_ok(&result);
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
+    assert_eq!(report["mode"], "micro");
+    assert_eq!(report["memories"]["active"], 1);
+    assert_eq!(report["memories"]["known"][0]["id"], memory_id);
+    assert!(report["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|target| target["path"] == "src/foo.rs"));
+    assert!(report["prompt"].as_str().unwrap().contains(&memory_id));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn claim_and_release_guard_a_task_frame() {
     let dir = temp_dir("claim");
     let file = dir.join("cm");

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::explore::{scan_repo, RepoScan};
 use crate::model::{
     build_merged, cmx_line, content_hash, estimate_tokens, kind_id, memory_payload, memory_snippet,
     minhash_signature, minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu,
@@ -444,6 +445,7 @@ pub fn run() -> Result<()> {
         "govern" => cmd_govern(&arg_path(&args), &args),
         "audit" => cmd_audit(&arg_path(&args), &args),
         "brief" => cmd_brief(&arg_path(&args), &args),
+        "explore" => cmd_explore(&arg_path(&args), &args),
         "pack" => cmd_pack(&arg_path(&args), &args),
         "absorb" => cmd_absorb(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
@@ -556,6 +558,7 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
+         cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items 8] [--root <dir>] [--format prompt|json]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
          cm absorb --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm claim --task <id>|current --owner <id> [--lease 30]
@@ -1664,15 +1667,14 @@ pub(crate) fn changed_paths(root: &Path) -> Result<HashSet<String>> {
     let data = String::from_utf8_lossy(&output.stdout);
     let mut paths = HashSet::new();
     for entry in data.split('\0').filter(|entry| !entry.is_empty()) {
-        let mut parts = entry.splitn(3, char::is_whitespace);
-        let _status = parts.next();
-        let Some(path) = parts.next() else {
+        // porcelain v1 -z stores `XY PATH` with exactly two status bytes.
+        let Some(path) = entry.get(3..) else {
             continue;
         };
+        let path = path.rsplit_once(" -> ").map(|(_, new)| new).unwrap_or(path);
         if path.is_empty() {
             continue;
         }
-        let path = path.rsplit_once(" -> ").map(|(_, new)| new).unwrap_or(path);
         paths.insert(path.replace('\\', "/").to_lowercase());
     }
     Ok(paths)
@@ -2534,6 +2536,540 @@ fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {
         total += estimate_tokens(&serde_json::to_string(memory)?);
     }
     Ok(total)
+}
+
+struct ExploreKnown {
+    memory: crate::model::Memory,
+    preview: String,
+}
+
+struct ExploreTarget {
+    path: String,
+    reason: String,
+}
+
+fn ensure_explore_frame(
+    path: &Path,
+    root: &Path,
+    requested_task: Option<&str>,
+) -> Result<(String, Option<TaskFrame>)> {
+    let repo = root
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "repo".to_string());
+    let default_task = format!("explore:{repo}");
+    let lookup = requested_task
+        .filter(|task| *task != "current")
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if requested_task == Some("current") {
+                "current".to_string()
+            } else {
+                default_task.clone()
+            }
+        });
+    let mut store = Store::open(path)?;
+    if let Some((memory, frame)) = latest_frame(&mut store, Some(&lookup))? {
+        return Ok((memory.id, Some(frame)));
+    }
+    drop(store);
+    let task = requested_task
+        .filter(|task| *task != "current")
+        .map(str::to_string)
+        .unwrap_or(default_task);
+    let frame = TaskFrame {
+        task,
+        goal: format!("Explore repository {repo} and record high-signal cm memory"),
+        status: "active".to_string(),
+        constraints: Vec::new(),
+        next: vec!["follow the explore protocol and absorb the result".to_string()],
+        open: Vec::new(),
+        touches: Vec::new(),
+        notes: Vec::new(),
+        owner: None,
+        lease_until: None,
+        updated_at: crate::model::now_ms(),
+    };
+    let memory = save_frame(path, &frame, None, "agent:explore", None, false)?;
+    Ok((memory.id, Some(frame)))
+}
+
+fn display_explore_root(root: &Path) -> String {
+    let text = root.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
+}
+
+fn explore_source_path(memory: &crate::model::Memory) -> Option<String> {
+    source_parts(&memory.source).map(|(path, _)| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string()
+    })
+}
+
+fn collect_explore_known(
+    store: &mut Store,
+    query: &str,
+    task: Option<&str>,
+    active: &[crate::model::Memory],
+) -> Result<Vec<ExploreKnown>> {
+    let mut known = Vec::new();
+    let mut seen = HashSet::new();
+    let (selected, _) = select_context(
+        store,
+        query,
+        1000,
+        32,
+        None,
+        task.map(str::to_string),
+        None,
+        Some("imported".to_string()),
+        12,
+        0.0,
+        true,
+    )?;
+    for memory in selected {
+        seen.insert(memory.id.clone());
+        known.push(ExploreKnown {
+            preview: memory_snippet(&memory, query, 180),
+            memory,
+        });
+    }
+    let mut recent: Vec<crate::model::Memory> = active
+        .iter()
+        .filter(|memory| !matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND))
+        .filter(|memory| !seen.contains(&memory.id))
+        .cloned()
+        .collect();
+    recent.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for memory in recent {
+        if known.len() >= 24 {
+            break;
+        }
+        seen.insert(memory.id.clone());
+        known.push(ExploreKnown {
+            preview: memory_snippet(&memory, query, 180),
+            memory,
+        });
+    }
+    Ok(known)
+}
+
+fn explore_coverage(memories: &[crate::model::Memory], path: &str) -> usize {
+    memories
+        .iter()
+        .filter(|memory| {
+            explore_source_path(memory).is_some_and(|source| {
+                source == path
+                    || source
+                        .strip_prefix(path)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        })
+        .count()
+}
+
+fn collect_explore_targets(
+    mode: &str,
+    scan: &RepoScan,
+    changed: &[String],
+    frame: Option<&TaskFrame>,
+    known: &[ExploreKnown],
+    active: &[crate::model::Memory],
+) -> Vec<ExploreTarget> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |path: String, reason: String| {
+        let path = path.replace('\\', "/").trim_start_matches("./").to_string();
+        if path.is_empty() || !seen.insert(path.clone()) {
+            return;
+        }
+        targets.push(ExploreTarget { path, reason });
+    };
+    if mode == "macro" {
+        for manifest in &scan.manifests {
+            push(
+                manifest.clone(),
+                "manifest: build, test, or workspace boundary".to_string(),
+            );
+        }
+        for entrypoint in &scan.entrypoints {
+            push(
+                entrypoint.clone(),
+                "entry point: trace a runtime path".to_string(),
+            );
+        }
+        for dir in &scan.top_dirs {
+            let covered = explore_coverage(active, &dir.path);
+            push(
+                dir.path.clone(),
+                format!(
+                    "{} source files / {} files; {} active memories cite this area",
+                    dir.sources, dir.files, covered
+                ),
+            );
+        }
+    } else {
+        for path in changed {
+            push(path.clone(), "git-changed file".to_string());
+        }
+        if let Some(frame) = frame {
+            for touch in &frame.touches {
+                push(touch.clone(), "task frame touch".to_string());
+            }
+        }
+        for known in known {
+            if let Some(path) = explore_source_path(&known.memory) {
+                push(path, "existing memory source: verify or update".to_string());
+            }
+        }
+        for dir in &scan.top_dirs {
+            if explore_coverage(active, &dir.path) == 0 {
+                push(
+                    dir.path.clone(),
+                    format!("uncovered area: {} source files", dir.sources),
+                );
+            }
+        }
+    }
+    drop(push);
+    targets.truncate(28);
+    if targets.is_empty() {
+        targets.push(ExploreTarget {
+            path: ".".to_string(),
+            reason: "repository root".to_string(),
+        });
+    }
+    targets
+}
+
+fn explore_mode(
+    requested: &str,
+    active_count: usize,
+    changed: &[String],
+    frame: Option<&TaskFrame>,
+    explicit_query: bool,
+) -> Result<&'static str> {
+    match requested {
+        "macro" => Ok("macro"),
+        "micro" => Ok("micro"),
+        "auto" => {
+            if active_count == 0 {
+                return Ok("macro");
+            }
+            let touches = frame.is_some_and(|frame| !frame.touches.is_empty());
+            if !changed.is_empty() || touches || explicit_query {
+                Ok("micro")
+            } else {
+                Ok("macro")
+            }
+        }
+        other => bail!("invalid explore mode {other:?}; expected auto, macro, or micro"),
+    }
+}
+
+fn explore_protocol(mode: &str) -> &'static str {
+    if mode == "macro" {
+        "1. Read manifests and entry points first; do not walk the whole repository.\n\
+         2. Map the top-level packages/modules and the boundary between them.\n\
+         3. Identify build, test, and release commands, including required environment.\n\
+         4. Trace one or two critical runtime paths from an entry point to storage/network.\n\
+         5. Record durable architecture facts, constraints, procedures, and non-obvious edge cases.\n\
+         6. Skip README marketing, file-by-file inventories, and generic summaries."
+    } else {
+        "1. Start with TARGETS: changed files, frame touches, and existing memory sources.\n\
+         2. Read only those files and their direct callers, callees, and tests.\n\
+         3. Compare existing memories on those paths; supersede stale behavior and forget only proven dead claims.\n\
+         4. Record delta facts: changed invariants, edge cases, commands, and caller contracts.\n\
+         5. Do not re-summarize unchanged modules or repeat the whole architecture."
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExplorePromptInput<'a> {
+    mode: &'a str,
+    root: &'a Path,
+    task: Option<&'a str>,
+    query: &'a str,
+    evidence_id: &'a str,
+    scan: &'a RepoScan,
+    changed: &'a [String],
+    known: &'a [ExploreKnown],
+    active_count: usize,
+    anchored_count: usize,
+    targets: &'a [ExploreTarget],
+    max_items: usize,
+}
+
+fn build_explore_prompt(input: ExplorePromptInput<'_>) -> String {
+    let ExplorePromptInput {
+        mode,
+        root,
+        task,
+        query,
+        evidence_id,
+        scan,
+        changed,
+        known,
+        active_count,
+        anchored_count,
+        targets,
+        max_items,
+    } = input;
+    let mut out = String::new();
+    let mut line = |text: &str| {
+        out.push_str(text);
+        out.push('\n');
+    };
+    line("You are exploring a repository to build cm, a compact source-grounded memory for coding agents.");
+    line("Return only strict JSONL memory operations. No markdown, no prose, no analysis.");
+    line("");
+    line("EXPLORATION");
+    line(&format!("MODE: {mode}"));
+    line(&format!("ROOT: {}", display_explore_root(root)));
+    line(&format!("TASK: {}", task.unwrap_or("(none)")));
+    line(&format!("QUERY: {query}"));
+    line(&format!("EVIDENCE_ID: {evidence_id}"));
+    line(&format!("MAX_RECORDS: {max_items}"));
+    line("");
+    line("REPOSITORY SNAPSHOT");
+    line(&format!(
+        "files: {} (source files: {})",
+        scan.files, scan.source_files
+    ));
+    if !scan.manifests.is_empty() {
+        line("manifests:");
+        for manifest in &scan.manifests {
+            line(&format!("- {manifest}"));
+        }
+    }
+    if !scan.entrypoints.is_empty() {
+        line("entry points:");
+        for entrypoint in &scan.entrypoints {
+            line(&format!("- {entrypoint}"));
+        }
+    }
+    if !scan.top_dirs.is_empty() {
+        line("top-level areas:");
+        for dir in &scan.top_dirs {
+            line(&format!(
+                "- {}: {} files, {} source files",
+                dir.path, dir.files, dir.sources
+            ));
+        }
+    }
+    if !changed.is_empty() {
+        line("git changes:");
+        for path in changed.iter().take(40) {
+            line(&format!("- {path}"));
+        }
+    }
+    line("");
+    line("EXISTING MEMORY");
+    line(&format!(
+        "active records: {active_count}; source-anchored: {anchored_count}"
+    ));
+    if known.is_empty() {
+        line("none; this is a first exploration.");
+    } else {
+        line("known records (use their ids for supersede/forget/evidence):");
+        for known in known {
+            line(&format!(
+                "- {} | {} | {} | {} | {}",
+                known.memory.id,
+                known.memory.kind,
+                known.memory.subject,
+                known.memory.source,
+                known.preview.replace('\n', " ")
+            ));
+        }
+    }
+    line("");
+    line("TARGETS");
+    for target in targets {
+        line(&format!("- {}: {}", target.path, target.reason));
+    }
+    line("");
+    line("PROTOCOL");
+    for step in explore_protocol(mode).lines() {
+        line(step);
+    }
+    line("");
+    line("QUALITY BAR");
+    line("- One claim per record; 1-3 sentences; text <=800 characters.");
+    line("- Prefer exact identifiers, paths, commands, invariants, and edge cases; no generic advice.");
+    line("- source must point at the line that proves the claim: path:symbol. Use a bare path only when the whole file is the claim.");
+    line("- Do not restate README/docs, invent symbols, or record file-by-file inventories.");
+    line("- Do not duplicate a known subject: use supersede with the existing id instead.");
+    line("- If nothing durable is learned, return an empty response. Prefer 0 records over low-value noise.");
+    line("");
+    line("OUTPUT");
+    line("Exactly one JSON object per line, one of:");
+    line("{\"op\":\"remember\",\"kind\":\"fact|decision|preference|constraint|episode|procedure\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"<=800 chars\",\"source\":\"path:symbol\",\"evidence\":[\"<id>\"],\"confidence\":0.0}");
+    line("{\"op\":\"supersede\",\"kind\":\"...\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"...\",\"source\":\"path:symbol\",\"supersedes\":[\"<existing-id>\"],\"evidence\":[\"<id>\"]}");
+    line("{\"op\":\"forget\",\"id\":\"<existing-id>\",\"reason\":\"...\"}");
+    line("");
+    line(&format!(
+        "For every new observation, evidence must contain \"{evidence_id}\" or a specific known-memory id."
+    ));
+    line("Never create kind=frame or kind=feedback. Never invent a source. Never use a reserved __cm_* scope.");
+    out
+}
+
+fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
+    if !root.is_dir() {
+        bail!("explore root is not a directory: {}", root.display());
+    }
+    let root = root.canonicalize().unwrap_or(root);
+    let requested_mode = arg_value(args, "--mode").unwrap_or_else(|| "auto".to_string());
+    let requested_task = arg_value(args, "--task");
+    let explicit_query = arg_value(args, "--query");
+    let (evidence_id, frame) = ensure_explore_frame(path, &root, requested_task.as_deref())?;
+    let query = explicit_query
+        .clone()
+        .or_else(|| {
+            requested_task
+                .as_ref()
+                .and_then(|_| frame.as_ref().and_then(frame_query))
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "repository architecture, entry points, build/test commands, invariants, and non-obvious behavior in {}",
+                display_explore_root(&root)
+            )
+        });
+    let mut store = Store::open(path)?;
+    let active = active_memories(&mut store)?;
+    let user_memories: Vec<crate::model::Memory> = active
+        .iter()
+        .filter(|memory| !matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND))
+        .cloned()
+        .collect();
+    let anchored_count = user_memories
+        .iter()
+        .filter(|memory| memory.source_hash.is_some())
+        .count();
+    let changed: Vec<String> = changed_paths(&root)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let mut changed = changed;
+    changed.retain(|path| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        name != "cm" && name != "cm.cache" && name != "cm.lock"
+    });
+    changed.sort();
+    let mode = explore_mode(
+        &requested_mode,
+        user_memories.len(),
+        &changed,
+        frame.as_ref(),
+        explicit_query.is_some(),
+    )?;
+    let max_items = arg_usize(args, "--max-items", 8).clamp(1, 32);
+    let budget = arg_usize(args, "--budget", 2000).max(300);
+    let task = frame.as_ref().map(|frame| frame.task.as_str());
+    let known = collect_explore_known(&mut store, &query, task, &active)?;
+    let scan = scan_repo(&root);
+    let targets = collect_explore_targets(
+        mode,
+        &scan,
+        &changed,
+        frame.as_ref(),
+        &known,
+        &user_memories,
+    );
+    let mut prompt = build_explore_prompt(ExplorePromptInput {
+        mode,
+        root: &root,
+        task,
+        query: &query,
+        evidence_id: &evidence_id,
+        scan: &scan,
+        changed: &changed,
+        known: &known,
+        active_count: user_memories.len(),
+        anchored_count,
+        targets: &targets,
+        max_items,
+    });
+    let mut prompt_known = known;
+    while estimate_tokens(&prompt) > budget && !prompt_known.is_empty() {
+        prompt_known.pop();
+        prompt = build_explore_prompt(ExplorePromptInput {
+            mode,
+            root: &root,
+            task,
+            query: &query,
+            evidence_id: &evidence_id,
+            scan: &scan,
+            changed: &changed,
+            known: &prompt_known,
+            active_count: user_memories.len(),
+            anchored_count,
+            targets: &targets,
+            max_items,
+        });
+    }
+    let known = prompt_known;
+    let repo_json = json!({
+        "files": scan.files,
+        "source_files": scan.source_files,
+        "top_dirs": scan.top_dirs.iter().map(|dir| json!({
+            "path": dir.path,
+            "files": dir.files,
+            "sources": dir.sources
+        })).collect::<Vec<_>>(),
+        "manifests": scan.manifests,
+        "entrypoints": scan.entrypoints,
+        "changed": changed
+    });
+    let memories_json = json!({
+        "active": user_memories.len(),
+        "source_anchored": user_memories.iter().filter(|memory| memory.source_hash.is_some()).count(),
+        "known": known.iter().map(|known| json!({
+            "id": known.memory.id,
+            "kind": known.memory.kind,
+            "subject": known.memory.subject,
+            "source": known.memory.source,
+            "preview": known.preview
+        })).collect::<Vec<_>>()
+    });
+    let targets_json = targets
+        .iter()
+        .map(|target| json!({"path": target.path, "reason": target.reason}))
+        .collect::<Vec<_>>();
+    let format = arg_value(args, "--format").unwrap_or_else(|| "prompt".to_string());
+    match format.as_str() {
+        "json" => outln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ok": true,
+                "mode": mode,
+                "root": display_explore_root(&root),
+                "task": task,
+                "query": query,
+                "evidence_id": evidence_id,
+                "budget": budget,
+                "max_items": max_items,
+                "repo": repo_json,
+                "memories": memories_json,
+                "targets": targets_json,
+                "prompt": prompt
+            }))?
+        ),
+        "prompt" | "text" => outln!("{}", prompt),
+        other => bail!("invalid explore format {other:?}; expected prompt or json"),
+    }
+    Ok(())
 }
 
 fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {

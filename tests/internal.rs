@@ -10,6 +10,8 @@
 mod cache;
 #[path = "../src/cli.rs"]
 mod cli;
+#[path = "../src/explore.rs"]
+mod explore;
 #[path = "../src/install.rs"]
 mod install;
 #[path = "../src/model.rs"]

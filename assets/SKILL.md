@@ -108,6 +108,27 @@ $CM remember --file "$F" --kind decision --scope <scope> \
   same-subject conflict.
 - Never store raw transcripts, secrets, or long code blocks.
 
+## Explore
+
+For first-time repository onboarding or later revalidation, ask `cm` for a
+guided exploration prompt instead of wandering:
+
+```bash
+$CM explore --file "$F" --root . --mode auto --max-items 8 > explore.prompt
+# send explore.prompt to the model, save strict JSONL as result.jsonl
+$CM absorb --file "$F" --input result.jsonl --dry-run
+$CM absorb --file "$F" --input result.jsonl --replace
+```
+
+`macro` covers manifests, entry points, module boundaries, build/test paths, and
+invariants. `micro` starts from git changes, frame touches, and existing memory
+sources, then writes only deltas and supersedes stale records. `auto` chooses
+macro for an empty store and micro when there are changes or an explicit query.
+The prompt contains a frame evidence ID, known-memory IDs, targets, and the
+absorb contract. Prefer a small `--max-items`; an empty result is valid.
+`explore` only guides: the model reads the selected files, and `absorb` validates
+sources and evidence.
+
 ## Compress
 
 When many raw notes or long exploration results must become durable memory, use
