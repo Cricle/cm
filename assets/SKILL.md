@@ -116,6 +116,10 @@ evidence IDs from the pack and a real `path:symbol` or `agent:<name>` source.
 Exact duplicates are detected and skipped. The model proposes; `cm` verifies and
 stores.
 
+Use direct `remember` for a few symbol-precise facts. Use `pack → absorb` when
+compressing many notes or when the agent should not spend turns on memory
+bookkeeping.
+
 ## Maintain
 
 ```bash

@@ -143,6 +143,26 @@ This validates the contract end to end; it is not yet a benefit claim. The next
 gate is comparing `pack → model → absorb` against direct `remember` on the same
 task.
 
+## Direct remember vs pack/absorb
+
+Same task, same starting store, same model, two fresh copies of `cm`. Both were
+asked to compress the architecture explanation into three durable memories.
+
+| Path | Agent tokens | Agent tool uses | Wall time | Memories | Source quality |
+|---|---:|---:|---:|---:|---|
+| direct `remember` | 175,616 | 8 | 52.6s | 3 | 3/3 with `path:symbol:line` |
+| `pack → model → absorb` | 42,242 | 1 | 35.6s | 3 | 2/3 with line, 1 path-only |
+
+`absorb` itself was one extra non-agent command. Even counting it, the pack path
+used ~75% fewer agent tokens and ~75% fewer tool calls. In this single run it
+also produced no subject collision, while direct `remember` created one duplicate
+subject. The trade-off is precision: the direct path produced symbol+line anchors
+on all three records; the pack path left one source as a bare path.
+
+Working rule: use direct `remember` for a few symbol-precise facts; use
+`pack → absorb` when compressing many notes or when the agent should not spend
+turns on memory bookkeeping.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
