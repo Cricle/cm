@@ -1062,6 +1062,42 @@ fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::V
     })
 }
 
+fn path_key(path: &str) -> String {
+    let trimmed = path.trim();
+    let without_dot = trimmed
+        .strip_prefix("./")
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.to_string());
+    without_dot.replace('\\', "/").to_lowercase()
+}
+
+fn source_covers_path(source: &str, touch: &str) -> bool {
+    let Some((relative, _)) = source_parts(source) else {
+        return false;
+    };
+    let source_key = path_key(&relative.to_string_lossy());
+    let touch_key = path_key(touch);
+    if touch_key.is_empty() || source_key.is_empty() {
+        return false;
+    }
+    source_key == touch_key
+        || source_key.starts_with(&format!("{touch_key}:"))
+        || source_key.starts_with(&format!("{touch_key}/"))
+}
+
+fn uncovered_touches(frame: &TaskFrame, memories: &[crate::model::Memory]) -> Vec<String> {
+    frame
+        .touches
+        .iter()
+        .filter(|touch| {
+            !memories
+                .iter()
+                .any(|memory| source_covers_path(&memory.source, touch))
+        })
+        .cloned()
+        .collect()
+}
+
 fn ensure_frame_owner(frame: &TaskFrame, owner: Option<&str>, action: &str) -> Result<()> {
     let now = crate::model::now_ms();
     if let Some(existing) = frame.owner.as_deref() {
@@ -1293,6 +1329,18 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
         );
     }
     if strict {
+        if !frame.touches.is_empty() {
+            let memories = active_memories(&mut store)?;
+            let uncovered = uncovered_touches(&frame, &memories);
+            if !uncovered.is_empty() {
+                bail!(
+                    "task {:?} touches {} path(s) with no cited memory: {}",
+                    frame.task,
+                    uncovered.len(),
+                    uncovered.join(", ")
+                );
+            }
+        }
         let audit = run_audit(path, &root, false, false, changed_only, None, None)?;
         let issue_count = audit["issue_count"].as_u64().unwrap_or(0);
         if issue_count > 0 {

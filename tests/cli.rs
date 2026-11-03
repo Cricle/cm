@@ -635,6 +635,98 @@ fn finish_strict_blocks_source_drift() {
 }
 
 #[test]
+fn finish_strict_requires_touch_coverage() {
+    let dir = temp_dir("finish-coverage");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(dir.join("src").join("a.rs"), "pub fn a() {}\n").expect("write a");
+    fs::write(dir.join("src").join("b.rs"), "pub fn b() {}\n").expect("write b");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Cover both files",
+            "--touch",
+            "src/a.rs",
+            "--touch",
+            "src/b.rs",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "a function",
+            "--text",
+            "The a function exists",
+            "--scope",
+            "repo",
+            "--source",
+            "src/a.rs:a",
+        ],
+    ));
+    let blocked = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--root",
+            dir.to_str().unwrap(),
+            "--strict",
+        ],
+    );
+    assert!(
+        !blocked.status.success(),
+        "uncovered touched path must block --strict"
+    );
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "b function",
+            "--text",
+            "The b function exists",
+            "--scope",
+            "repo",
+            "--source",
+            "src/b.rs:b",
+        ],
+    ));
+    let finish = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--root",
+            dir.to_str().unwrap(),
+            "--strict",
+        ],
+    );
+    assert_ok(&finish);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn remember_verify_source_rejects_bad_anchor() {
     let dir = temp_dir("verify-source");
     let file = dir.join("cm");

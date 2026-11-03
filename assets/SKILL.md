@@ -144,7 +144,7 @@ the source excerpt hash captured at write time; `--apply` records stale feedback
 for drift. `--refresh` re-anchors reviewed `source_changed` records under new IDs,
 superseding the old records. `cm finish` marks the frame done, writes a summary
 episode, and runs audit plus governance. With `--strict` it refuses to finish
-while open questions remain or sources drift; `--changed` limits that audit to
-git-visible changes.
+while open questions remain, a touched path has no cited memory, or sources
+drift; `--changed` limits that audit to git-visible changes.
 
 `cm.cache` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.

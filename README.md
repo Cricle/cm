@@ -105,8 +105,8 @@ unless the matching `--owner` is passed. `finish --summary ... --root <repo>
 --apply` also writes one episode summary and runs audit plus governance in the
 same command. With no `--summary`, it records `Completed: <goal>` so close-out
 never silently forgets the outcome. `--strict` refuses to finish while open
-questions remain or the source audit reports drift; `--changed` limits that
-audit to `git status` sources.
+questions remain, a `frame.touches` path has no cited memory, or the source audit
+reports drift; `--changed` limits that audit to `git status` sources.
 
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
