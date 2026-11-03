@@ -19,17 +19,22 @@ Generate wiki pages, not line-level snippets:
 ## Pipeline
 
 ```text
-repo inventory
-  -> question/candidate generation
+cm explore --mode macro|micro
+  -> model reads the guided targets and existing memory index
   -> atomic claim extraction
   -> source verification
   -> source repair (find the right path/symbol, do not silently drop)
   -> module coverage checklist
   -> page merge (2-4 related claims)
   -> duplicate/conflict check
-  -> import into a temporary cm
+  -> cm absorb
   -> blind answer test
 ```
+
+`cm explore` supplies the deterministic prompt: repository snapshot, macro/micro
+targets, known-memory IDs for `supersede`/`forget`, an exploration frame evidence
+ID, and the strict `absorb` JSONL contract. The model still does the reading and
+claim extraction; `absorb` validates every source anchor and evidence ID.
 
 ### Source repair
 

@@ -57,6 +57,7 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
+cm explore --file cm [--task <task>|current] [--mode auto|macro|micro] [--query <text>] [--max-items 8] [--root <dir>] [--format prompt|json]
 cm pack --file cm [--task <task>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
 cm absorb --file cm --input result.jsonl
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]

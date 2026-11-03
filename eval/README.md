@@ -36,6 +36,15 @@ no-answer accuracy 1.000
 
 This is why the eval deliberately reports both modes: thresholding is an explicit accuracy/precision trade-off, not a hidden default.
 
+## A/B fairness
+
+A valid A/B run uses the same task prompt, model, repository commit, time window,
+and available tools for both sides. The only difference is the memory store
+contents (or the presence of the `cm` memory tool, when that is the treatment).
+A precomputed `cm brief` placed in the task file is a prompt-injected product
+demo, not an equal-tools A/B, and must be reported separately. Store raw metrics
+in `eval/results/` and keep the setup description with them.
+
 ## Long-task A/B
 
 `agent_ab.py` runs each task in a fresh workspace twice: with a seeded `cm`

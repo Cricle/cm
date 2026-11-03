@@ -33,9 +33,15 @@ next steps, open questions, and touched paths for the current work item. It is
 stored as a normal memory record (`kind=frame`), superseded on update, and kept
 separate from project facts. `cm brief` composes the active frame with a
 budgeted task working set so a new session or another agent can resume without
-re-reading the repository. A frame can carry an owner lease (`claim`/`release`)
-so concurrent agents do not duplicate the same task; `cm finish` marks it done,
-writes one episode summary, and runs audit plus governance.
+re-reading the repository. `cm explore` is the guided onboarding counterpart:
+macro exploration maps manifests, entry points, and module boundaries; micro
+exploration starts from changed files, frame touches, and existing sources. It
+returns a deterministic prompt with targets, known-memory IDs, an evidence ID,
+and the strict absorb JSONL contract; the model reads the selected files and
+`cm absorb` verifies and stores the result. A frame can carry an owner lease
+(`claim`/`release`) so concurrent agents do not duplicate the same task;
+`cm finish` marks it done, writes one episode summary, and runs audit plus
+governance.
 
 ## Memory shape
 
