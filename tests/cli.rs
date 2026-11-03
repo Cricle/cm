@@ -386,6 +386,7 @@ fn explore_macro_prompt_for_first_run() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
     assert_eq!(report["mode"], "macro");
     assert_eq!(report["memories"]["active"], 0);
+    assert_eq!(report["max_items"], 16);
     assert!(!report["evidence_id"].as_str().unwrap_or("").is_empty());
     let prompt = report["prompt"].as_str().expect("prompt");
     assert!(prompt.contains("MODE: macro"), "{prompt}");
@@ -476,6 +477,7 @@ fn explore_micro_lists_existing_memories_and_sources() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
     assert_eq!(report["mode"], "micro");
     assert_eq!(report["memories"]["active"], 1);
+    assert_eq!(report["max_items"], 8);
     assert_eq!(report["memories"]["known"][0]["id"], memory_id);
     assert!(report["targets"]
         .as_array()

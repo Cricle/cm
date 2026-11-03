@@ -558,7 +558,7 @@ fn print_usage() {
          cm frame get --task <id>
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
-         cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items 8] [--root <dir>] [--format prompt|json]
+         cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items <n>] [--root <dir>] [--format prompt|json]
          cm explore --apply result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
          cm absorb --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
@@ -2942,6 +2942,15 @@ fn build_explore_prompt(input: ExplorePromptInput<'_>) -> String {
         line(&format!("- {}: {}", target.path, target.reason));
     }
     line("");
+    line("COVERAGE");
+    if mode == "macro" {
+        line("- Cover every top-level area that has durable behavior with at least one record; do not spend the whole budget on one package.");
+        line("- Use the full MAX_RECORDS budget for distinct high-value claims, not variations of one claim.");
+    } else {
+        line("- Cover each changed or touched target that has a durable delta; do not re-summarize untouched modules.");
+        line("- Prefer several precise deltas over one broad module summary.");
+    }
+    line("");
     line("PROTOCOL");
     for step in explore_protocol(mode).lines() {
         line(step);
@@ -3026,7 +3035,11 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
         frame.as_ref(),
         explicit_query.is_some(),
     )?;
-    let max_items = arg_usize(args, "--max-items", 8).clamp(1, 32);
+    let default_max_items = if mode == "macro" { 16 } else { 8 };
+    let max_items = arg_value(args, "--max-items")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default_max_items)
+        .clamp(1, 32);
     let budget = arg_usize(args, "--budget", 2000).max(300);
     let task = frame.as_ref().map(|frame| frame.task.as_str());
     let known = collect_explore_known(&mut store, &query, task, &active)?;

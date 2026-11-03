@@ -114,7 +114,7 @@ For first-time repository onboarding or later revalidation, ask `cm` for a
 guided exploration prompt instead of wandering:
 
 ```bash
-$CM explore --file "$F" --root . --mode auto --max-items 8 > explore.prompt
+$CM explore --file "$F" --root . --mode auto --max-items 16 > explore.prompt
 # send explore.prompt to the model, save strict JSONL as result.jsonl
 $CM explore --file "$F" --apply result.jsonl --dry-run
 $CM explore --file "$F" --apply result.jsonl --replace
