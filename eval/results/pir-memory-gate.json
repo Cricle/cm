@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-03",
+  "repo": "C:\\wp\\empty\\pir",
+  "commit": "305c831",
+  "tracked_files": 2123,
+  "source_files": 664,
+  "macro_explore": {
+    "tokens": 1829626,
+    "tool_uses": 49,
+    "duration_ms": 1009664,
+    "memories": 8
+  },
+  "gap_fill": {
+    "tokens": 1519285,
+    "tool_uses": 32,
+    "duration_ms": 485157,
+    "memories": 8,
+    "total_memories": 16
+  },
+  "independent_questions": {
+    "count": 5,
+    "authored_without_cm": true,
+    "tokens": 3690361,
+    "tool_uses": 53,
+    "duration_ms": 565933,
+    "answer_tokens": 4870052,
+    "answer_tool_uses": 78,
+    "answer_duration_ms": 874624,
+    "verdicts": {
+      "correct": 5,
+      "partial": 0,
+      "wrong": 0
+    }
+  },
+  "single_question_after_gap_fill": {
+    "question": "ToolScheduler ordering guarantees",
+    "with_memory": {
+      "tokens": 986738,
+      "tool_uses": 35,
+      "duration_ms": 242352
+    },
+    "cold": {
+      "tokens": 983708,
+      "tool_uses": 22,
+      "duration_ms": 206397
+    }
+  },
+  "notes": "Second-project correctness gate passes: all five independently authored questions were verified correct. Efficiency gate fails: the 8-record macro memory did not cover 4/5 questions, the answer run used 78 tools, and even the gap-filled q2 run was not cheaper or faster than cold. This project needs denser per-module memories before claiming a practical memory win."
+}

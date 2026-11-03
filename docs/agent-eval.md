@@ -217,6 +217,24 @@ honest than any single run. All six answers were source-correct in spot review
 against `findValidCutPoints` (394), `findCutPoint` (446), `compact` (952), and
 `tokensBefore` (884). Raw metrics: `eval/results/pi-equal-tools-ab.json`.
 
+## Second project: pir memory gate
+
+To avoid claiming a single-repository success, the same loop was run on `pir`
+(commit `305c831`; 2,123 tracked files, 664 Rust source files). A macro
+`cm explore` session produced 8 source-grounded memories; a separate clone
+without `cm` authored 5 diagnostic questions. The answer agent had the memory
+store and source access.
+
+All five answers were independently graded **correct**. The cost was not
+acceptable: the answer run used **4,870,052 tokens / 78 tool uses / 874.6s**,
+because the 8 macro memories did not cover four of the five questions. A micro
+gap-fill pass added 8 more memories (16 total, audit 0), but a single-question
+recheck (`ToolScheduler` ordering) still used **986,738 tokens / 35 tools /
+242.4s**, versus **983,708 / 22 / 206.4s** cold. The second-project correctness
+gate passes; the efficiency gate does not. Macro exploration needs denser
+per-module coverage before this is a practical memory set.
+Raw metrics: `eval/results/pir-memory-gate.json`.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
