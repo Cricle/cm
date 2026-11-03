@@ -2559,19 +2559,31 @@ fn ensure_explore_frame(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "repo".to_string());
     let default_task = format!("explore:{repo}");
-    let lookup = requested_task
-        .filter(|task| *task != "current")
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if requested_task == Some("current") {
-                "current".to_string()
-            } else {
-                default_task.clone()
-            }
-        });
     let mut store = Store::open(path)?;
-    if let Some((memory, frame)) = latest_frame(&mut store, Some(&lookup))? {
-        return Ok((memory.id, Some(frame)));
+    match requested_task {
+        Some("current") => {
+            if let Some((memory, frame)) = latest_frame(&mut store, Some("current"))? {
+                return Ok((memory.id, Some(frame)));
+            }
+        }
+        Some(task) => {
+            if let Some((memory, frame)) = latest_frame(&mut store, Some(task))? {
+                return Ok((memory.id, Some(frame)));
+            }
+        }
+        None => {
+            // Reuse an active task instead of hijacking `current` with an
+            // exploration-only frame. If no task is active, reuse the repo's
+            // exploration frame when one exists.
+            if let Some((memory, frame)) = latest_frame(&mut store, Some("current"))? {
+                if frame.status == "active" {
+                    return Ok((memory.id, Some(frame)));
+                }
+            }
+            if let Some((memory, frame)) = latest_frame(&mut store, Some(&default_task))? {
+                return Ok((memory.id, Some(frame)));
+            }
+        }
     }
     drop(store);
     let task = requested_task

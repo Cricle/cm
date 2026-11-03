@@ -462,6 +462,41 @@ fn explore_micro_lists_existing_memories_and_sources() {
 }
 
 #[test]
+fn explore_reuses_active_task_frame() {
+    let dir = temp_dir("explore-frame");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("src")).expect("create repo");
+    fs::write(repo.join("src").join("main.rs"), "fn main() {}\n").expect("source");
+    assert_ok(&run(&repo, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &repo,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "real-task",
+            "--goal",
+            "Ship the real task",
+        ],
+    ));
+    let result = run(
+        &repo,
+        &[
+            "explore", "--file", file_arg, "--root", ".", "--mode", "macro", "--format", "json",
+        ],
+    );
+    assert_ok(&result);
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
+    assert_eq!(report["task"], "real-task");
+    assert_eq!(report["memories"]["active"], 0);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn claim_and_release_guard_a_task_frame() {
     let dir = temp_dir("claim");
     let file = dir.join("cm");
