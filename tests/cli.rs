@@ -1517,6 +1517,83 @@ fn brief_inlines_source_snippet() {
 }
 
 #[test]
+fn symbol_anchor_skips_comments_and_snippet_starts_at_definition() {
+    let dir = temp_dir("symbol-comment");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(
+        dir.join("src").join("compaction.ts"),
+        "// compact() is discussed in this header comment.\n\
+         export async function compact(\n\
+         \tvalue: number,\n\
+         ): Promise<number> {\n\
+         \treturn value;\n\
+         }\n",
+    )
+    .expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Explain compact",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "compact",
+            "--text",
+            "compact merges summaries",
+            "--scope",
+            "repo",
+            "--source",
+            "src/compaction.ts:compact",
+            "--verify-source",
+        ],
+    ));
+    let root_arg = dir.to_str().unwrap();
+    let brief = run(
+        &dir,
+        &[
+            "brief",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--budget",
+            "500",
+            "--format",
+            "prompt",
+            "--snippets",
+            "4",
+            "--root",
+            root_arg,
+        ],
+    );
+    assert_ok(&brief);
+    let output = String::from_utf8_lossy(&brief.stdout);
+    assert!(output.contains("src/compaction.ts:compact:2"), "{output}");
+    assert!(
+        output.contains("export async function compact("),
+        "{output}"
+    );
+    assert!(!output.contains("snippet:\n// compact()"), "{output}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn brief_suppresses_repeatedly_wrong_memories() {
     let dir = temp_dir("brief-feedback");
     let file = dir.join("cm");

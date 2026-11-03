@@ -1717,39 +1717,115 @@ fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
 }
 
 fn find_symbol_line(lines: &[&str], symbol: &str) -> Option<usize> {
-    let definitions = [
-        "fn ",
-        "pub fn ",
-        "struct ",
-        "pub struct ",
-        "enum ",
-        "pub enum ",
-        "trait ",
-        "pub trait ",
-        "impl ",
-        "class ",
-        "def ",
-        "function ",
-        "const ",
-        "pub const ",
-        "static ",
+    const KEYWORDS: &[&str] = &[
+        "fn",
+        "function",
+        "def",
+        "class",
+        "struct",
+        "enum",
+        "trait",
+        "interface",
+        "type",
+        "const",
+        "let",
+        "var",
+        "impl",
+        "module",
+        "namespace",
+        "func",
+        "fun",
+        "record",
+        "object",
+        "protocol",
+        "extension",
+        "actor",
     ];
-    let matches: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(symbol))
-        .map(|(index, _)| index)
-        .collect();
-    for &index in &matches {
-        let line = lines[index].trim_start();
-        if definitions.iter().any(|prefix| {
-            line.strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with(symbol))
-        }) {
+    const MODIFIERS: &[&str] = &[
+        "export",
+        "default",
+        "async",
+        "pub",
+        "public",
+        "private",
+        "protected",
+        "static",
+        "readonly",
+        "abstract",
+        "declare",
+        "override",
+        "final",
+        "open",
+        "unsafe",
+        "extern",
+        "sealed",
+        "mut",
+    ];
+    let mut fallback = None;
+    for (index, raw) in lines.iter().enumerate() {
+        let line = raw.trim_start();
+        if line.is_empty() || is_comment_line(line) {
+            continue;
+        }
+        let Some(start) = identifier_occurrence(line, symbol) else {
+            continue;
+        };
+        fallback.get_or_insert(index);
+        let prefix = line[..start].trim_end();
+        let previous = previous_word(prefix);
+        let after = line[start + symbol.len()..].trim_start();
+        if KEYWORDS.contains(&previous.as_str())
+            || (prefix
+                .split_whitespace()
+                .all(|word| MODIFIERS.contains(&word))
+                && after.starts_with(['(', '<', '=', '{', ':', '[', '!']))
+            || (prefix.starts_with("func ") && after.starts_with('('))
+        {
             return Some(index);
         }
     }
-    matches.into_iter().next()
+    fallback
+}
+
+fn is_comment_line(line: &str) -> bool {
+    line.starts_with("//")
+        || line.starts_with("/*")
+        || line.starts_with('*')
+        || line.starts_with("--")
+}
+
+fn identifier_occurrence(line: &str, symbol: &str) -> Option<usize> {
+    let mut search = 0usize;
+    while let Some(found) = line[search..].find(symbol) {
+        let start = search + found;
+        let end = start + symbol.len();
+        let before_ok = line[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_identifier_char(ch));
+        let after_ok = line[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_identifier_char(ch));
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        search = end;
+    }
+    None
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '$'
+}
+
+fn previous_word(prefix: &str) -> String {
+    prefix
+        .split_whitespace()
+        .next_back()
+        .unwrap_or_default()
+        .trim_matches(|ch: char| matches!(ch, '(' | ')' | '<' | '>' | '*' | '&' | '?' | '!'))
+        .to_string()
 }
 
 fn source_anchor(source: &str) -> Option<(u32, String)> {
@@ -1777,7 +1853,7 @@ fn source_snippet(memory: &crate::model::Memory, root: &Path, lines: usize) -> O
     if all.is_empty() {
         return None;
     }
-    let start = line.saturating_sub(1).saturating_sub(2);
+    let start = line.saturating_sub(1);
     let end = (start + lines.max(1)).min(all.len());
     Some(all[start..end].join("\n"))
 }
