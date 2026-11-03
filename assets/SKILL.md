@@ -114,18 +114,17 @@ For first-time repository onboarding or later revalidation, ask `cm` for a
 guided exploration prompt instead of wandering:
 
 ```bash
-$CM explore --file "$F" --root . --mode auto --max-items 16 > explore.prompt
+$CM explore --file "$F" --root . > explore.prompt
 # send explore.prompt to the model, save strict JSONL as result.jsonl
 $CM explore --file "$F" --apply result.jsonl --dry-run
 $CM explore --file "$F" --apply result.jsonl --replace
 ```
 
-`macro` covers manifests, entry points, module boundaries, build/test paths, and
-invariants. `micro` starts from git changes, frame touches, and existing memory
-sources, then writes only deltas and supersedes stale records. `auto` chooses
-macro for an empty store and micro when there are changes or an explicit query.
-The prompt contains a frame evidence ID, known-memory IDs, targets, and the
-absorb contract. Prefer a small `--max-items`; an empty result is valid.
+`cm explore` chooses macro for an empty store and micro when there are changes,
+frame touches, or an explicit query; it also scales the record count and prompt
+budget to the repository size. `--mode`, `--query`, `--max-items`, and `--budget`
+are optional overrides. The prompt contains a frame evidence ID, known-memory
+IDs, targets, and the absorb contract. An empty result is valid.
 `explore` only guides: the model reads the selected files, and `absorb` validates
 sources and evidence.
 

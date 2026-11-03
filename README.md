@@ -57,7 +57,7 @@ cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--sco
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
-cm explore --file cm [--task <task>|current] [--mode auto|macro|micro] [--query <text>] [--max-items <n>] [--root <dir>] [--format prompt|json]
+cm explore --file cm --root .    # auto mode/records/budget
 cm pack --file cm [--task <task>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
 cm absorb --file cm --input result.jsonl
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
@@ -108,22 +108,20 @@ exact-duplicate check. `--dry-run` validates without writing. `--replace` makes
 records that already exceed the normal 800-character compression limit. The
 model proposes; `cm` still verifies and stores.
 
-`explore` is the guided repository-onboarding loop. It creates or reuses an
-`explore:<repo>` frame, scans the repository surface (manifests, entry points,
-top-level areas, current git changes), indexes existing memories, and emits a
-mode-specific prompt. `--mode macro` is for first exploration or architecture
-refresh: read manifests and entry points, map module boundaries, build/test
-paths, and invariants. `--mode micro` is for nth exploration: start from changed
-files, frame touches, and existing memory sources, then record deltas and
-supersede stale memories. `auto` chooses macro for an empty store and micro when
-changes, task touches, or an explicit query exist. The prompt carries a frame
-`EVIDENCE_ID` and the absorb JSONL contract, so the same `cm absorb` command
-writes the result. Macro defaults to 16 records and micro to 8; use a lower
-`--max-items` for a quick pass. The prompt explicitly allows an empty result. `explore --apply result.jsonl` is the shorthand for the
-`absorb` step, including `--dry-run`, `--replace`, and `--allow-long-text`.
-`explore` is a guide, not an autonomous crawler: it reports paths and candidate
-targets, while the model reads the chosen files and `absorb` still validates
-every source and evidence ID.
+`explore` is the guided repository-onboarding loop. The simple form is
+`cm explore --file cm --root .`; it creates or reuses a task frame, scans the
+repository surface, indexes existing memories, and chooses macro/micro and the
+record budget dynamically. Macro is for first exploration or architecture
+refresh: manifests, entry points, module boundaries, build/test paths, and
+invariants. Micro starts from changed files, frame touches, and existing memory
+sources, then records deltas and supersedes stale memories. The prompt carries
+a frame `EVIDENCE_ID` and the absorb JSONL contract, so the same `cm absorb`
+command writes the result. Advanced users can override `--mode`, `--query`,
+`--max-items`, or `--budget`; the prompt explicitly allows an empty result.
+`explore --apply result.jsonl` is the shorthand for the `absorb` step, including
+`--dry-run`, `--replace`, and `--allow-long-text`. `explore` is a guide, not an
+autonomous crawler: it reports paths and candidate targets, while the model
+reads the chosen files and `absorb` still validates every source and evidence ID.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
@@ -181,7 +179,7 @@ cm frame set --file cm --task <id> --goal <text> [--constraint <text>]... [--nex
 cm frame get --file cm --task <id>
 cm frame list [--file cm]
 cm brief --file cm [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 5] [--min-trust imported] [--query <text>]
-cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items <n>] [--root <dir>] [--format prompt|json] [--file cm]
+cm explore --file cm --root . [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget <n>] [--max-items <n>] [--format prompt|json]
 cm explore --apply result.jsonl [--dry-run] [--replace] [--allow-long-text] [--file cm]
 cm pack --file cm [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] [--scope <scope>] [--top 16] [--max-items 8] [--query <text>]
 cm absorb --file cm --input result.jsonl [--dry-run] [--replace] [--allow-long-text]

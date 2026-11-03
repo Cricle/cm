@@ -3035,15 +3035,24 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
         frame.as_ref(),
         explicit_query.is_some(),
     )?;
-    let default_max_items = if mode == "macro" { 16 } else { 8 };
+    let task = frame.as_ref().map(|frame| frame.task.as_str());
+    let known = collect_explore_known(&mut store, &query, task, &active)?;
+    let scan = scan_repo(&root);
+    let default_max_items = if mode == "macro" {
+        (8 + scan.source_files / 250).clamp(8, 24)
+    } else {
+        (4 + known.len() / 4).clamp(6, 16)
+    };
     let max_items = arg_value(args, "--max-items")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default_max_items)
         .clamp(1, 32);
-    let budget = arg_usize(args, "--budget", 2000).max(300);
-    let task = frame.as_ref().map(|frame| frame.task.as_str());
-    let known = collect_explore_known(&mut store, &query, task, &active)?;
-    let scan = scan_repo(&root);
+    let default_budget = if mode == "macro" {
+        2000 + max_items * 40
+    } else {
+        1200 + max_items * 40
+    };
+    let budget = arg_usize(args, "--budget", default_budget).max(300);
     let targets = collect_explore_targets(
         mode,
         &scan,
