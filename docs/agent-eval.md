@@ -196,6 +196,26 @@ memory supersedes, `absorb --replace` wrote all 18. `audit --root .` then checke
 0 conflicts, 0 expired, full checksum OK. Identical-text re-anchoring is now a
 covered CLI test.
 
+## Pi re-anchored brief A/B
+
+After re-anchoring and the snippet fixes, the same task was repeated on two
+fresh clones of pi HEAD. Both clones excluded `cm` and temporary fixture files.
+The memory run received a 1,600-token `cm brief` with three-line source
+snippets; the control received only the task text.
+
+| Mode | Tokens | Tool uses | Wall time |
+|---|---:|---:|---:|
+| with cm brief | 182,031 | 11 | 121.9s |
+| without cm | 1,297,004 | 39 | 748.2s |
+
+That is **-86.0% tokens**, **-71.8% tool uses**, and **-83.7% wall time** in this
+run. Both answers were source-correct in spot review against
+`findValidCutPoints` (line 394), `findCutPoint` (446), `compact` (952), and
+`tokensBefore` (884). The control spent 12.5 minutes discovering the monorepo;
+single-run variance is high, so treat the gap as directional rather than a
+guarantee. The memory run also improved from the earlier 274,591-token pi run
+after source re-anchoring and snippet correction.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
