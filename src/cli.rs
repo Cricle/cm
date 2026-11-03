@@ -2428,7 +2428,7 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
     outln!("{{\"op\":\"supersede\",\"kind\":\"...\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"...\",\"source\":\"...\",\"supersedes\":[\"<memory-id>\"],\"evidence\":[\"<memory-id>\"]}}");
     outln!("{{\"op\":\"forget\",\"id\":\"<memory-id>\",\"reason\":\"...\"}}");
     outln!("");
-    outln!("Rules: evidence is required for remember and supersede. Never create kind=frame or kind=feedback. Never invent a source path or symbol.");
+    outln!("Rules: evidence is required for remember and supersede. Prefer path:symbol over a bare path; use a bare path only when the whole file is the claim. Never create kind=frame or kind=feedback. Never invent a source path or symbol.");
     Ok(())
 }
 
