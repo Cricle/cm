@@ -62,6 +62,22 @@ const ENTRY_NAMES: &[&str] = &[
     "main.go",
 ];
 
+pub(crate) fn is_explore_input(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if SKIP_FILES.contains(&name) {
+        return false;
+    }
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_lowercase())
+        .unwrap_or_default();
+    SOURCE_EXTS.contains(&extension.as_str())
+        || matches!(
+            extension.as_str(),
+            "toml" | "yaml" | "yml" | "json" | "md" | "txt" | "lock"
+        )
+}
+
 pub(crate) struct DirStat {
     pub path: String,
     pub files: usize,

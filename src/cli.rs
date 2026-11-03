@@ -2975,10 +2975,7 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
         .into_iter()
         .collect();
     let mut changed = changed;
-    changed.retain(|path| {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        name != "cm" && name != "cm.cache" && name != "cm.lock"
-    });
+    changed.retain(|path| crate::explore::is_explore_input(path));
     changed.sort();
     let mode = explore_mode(
         &requested_mode,
