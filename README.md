@@ -53,7 +53,7 @@ remains the project-local installation path.
 ## Everyday use
 
 ```text
-cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force]
+cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force] [--verify-source]
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
@@ -61,7 +61,7 @@ cm pack --file cm [--task <task>|current] [--budget 1200] [--snippets <n>] [--ro
 cm absorb --file cm --input result.jsonl
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
 cm release --file cm --task <task>|current [--owner <id>]
-cm finish --file cm [--task <task>|current] [--summary <text>] [--root <dir>] [--apply]
+cm finish --file cm [--task <task>|current] [--summary <text>] [--root <dir>] [--changed] [--strict] [--apply]
 cm forget --file cm --id <id>
 cm status [--file cm]
 cm cache-stats [--file cm]
@@ -103,13 +103,17 @@ while the lease is live. `release` clears it, and `finish` clears it together
 with marking the frame done. A live lease also blocks `frame set` and `finish`
 unless the matching `--owner` is passed. `finish --summary ... --root <repo>
 --apply` also writes one episode summary and runs audit plus governance in the
-same command.
+same command. With no `--summary`, it records `Completed: <goal>` so close-out
+never silently forgets the outcome. `--strict` refuses to finish while open
+questions remain or the source audit reports drift; `--changed` limits that
+audit to `git status` sources.
 
 `remember` is idempotent for exact content: it checks the recent tail and, for
 small indexes (≤10k docs), active index records. A duplicate returns the existing
 ID with `"duplicate": true` instead of appending. Use `--force` for a deliberate
 duplicate; `append`/`import` never deduplicate. Large indexes use the cheap
-tail-only check to avoid decoding every record on each write.
+tail-only check to avoid decoding every record on each write. `--verify-source`
+refuses a `path:symbol` source that cannot be anchored right now.
 
 `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
 problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,
@@ -150,7 +154,7 @@ cm pack --file cm [--task <id>|current] [--budget 1200] [--snippets <n>] [--root
 cm absorb --file cm --input result.jsonl [--dry-run]
 cm claim --file cm --task <id>|current --owner <id> [--lease 30]
 cm release --file cm --task <id>|current [--owner <id>]
-cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--apply]
+cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--changed] [--strict] [--apply]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
 cm audit --root <repo> [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--file cm]

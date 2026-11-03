@@ -486,6 +486,204 @@ fn finish_closes_frame_writes_summary_and_governs() {
 }
 
 #[test]
+fn finish_generates_summary_and_strict_blocks_open_work() {
+    let dir = temp_dir("finish-strict-open");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(dir.join("src").join("lib.rs"), "pub fn done() {}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--goal",
+            "Fix the parser",
+            "--open",
+            "error span format",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "done function",
+            "--text",
+            "The done function marks completion",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:done",
+        ],
+    ));
+    let blocked = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--root",
+            dir.to_str().unwrap(),
+            "--strict",
+        ],
+    );
+    assert!(!blocked.status.success(), "open work must block --strict");
+    let frame = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T1"]);
+    assert_ok(&frame);
+    let frame: serde_json::Value = serde_json::from_slice(&frame.stdout).expect("frame json");
+    assert_eq!(frame["status"], "active");
+
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame",
+            "set",
+            "--file",
+            file_arg,
+            "--task",
+            "T2",
+            "--goal",
+            "Write the summary",
+        ],
+    ));
+    let finish = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T2",
+            "--root",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_ok(&finish);
+    let report: serde_json::Value = serde_json::from_slice(&finish.stdout).expect("finish json");
+    assert!(report["summary_id"].as_str().is_some());
+    let frame = run(&dir, &["frame", "get", "--file", file_arg, "--task", "T2"]);
+    assert_ok(&frame);
+    let frame: serde_json::Value = serde_json::from_slice(&frame.stdout).expect("frame json");
+    assert_eq!(frame["status"], "done");
+    assert!(frame["notes"].as_array().unwrap().iter().any(|note| note
+        .as_str()
+        .unwrap()
+        .contains("Completed: Write the summary")));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn finish_strict_blocks_source_drift() {
+    let dir = temp_dir("finish-strict-drift");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    let source = dir.join("src").join("lib.rs");
+    fs::write(&source, "pub fn done() {}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "frame", "set", "--file", file_arg, "--task", "T1", "--goal", "Ship it",
+        ],
+    ));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "done function",
+            "--text",
+            "The done function marks completion",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:done",
+        ],
+    ));
+    fs::write(&source, "pub fn done() {\n    println!(\"bye\");\n}\n").expect("edit source");
+    let blocked = run(
+        &dir,
+        &[
+            "finish",
+            "--file",
+            file_arg,
+            "--task",
+            "T1",
+            "--root",
+            dir.to_str().unwrap(),
+            "--strict",
+        ],
+    );
+    assert!(
+        !blocked.status.success(),
+        "source drift must block --strict"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn remember_verify_source_rejects_bad_anchor() {
+    let dir = temp_dir("verify-source");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(dir.join("src").join("lib.rs"), "pub fn done() {}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "done function",
+            "--text",
+            "The done function marks completion",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:done",
+            "--verify-source",
+        ],
+    ));
+    let rejected = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "missing symbol",
+            "--text",
+            "This symbol does not exist",
+            "--scope",
+            "repo",
+            "--source",
+            "src/lib.rs:missing",
+            "--verify-source",
+        ],
+    );
+    assert!(
+        !rejected.status.success(),
+        "unanchored source must be rejected"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn governance_merges_near_duplicates() {
     let dir = temp_dir("merge");
     let file = dir.join("cm");

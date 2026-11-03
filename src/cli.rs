@@ -390,6 +390,12 @@ pub fn run() -> Result<()> {
                 trust: arg_value(&args, "--trust"),
                 source_commit: arg_value(&args, "--source-commit"),
             };
+            if has_flag(&args, "--verify-source")
+                && source_parts(&input.source).is_some()
+                && source_anchor(&input.source).is_none()
+            {
+                bail!("source does not anchor: {:?}", input.source);
+            }
             cmd_remember_input(
                 &arg_path(&args),
                 &input,
@@ -536,7 +542,7 @@ fn print_usage() {
     println!(
         "cm 1.0.0 - compact memory for AI agents
          
-         cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored]
+         cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored] [--verify-source]
          cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800]
          cm forget --file cm --id <id>
          cm status [--file cm]
@@ -549,7 +555,7 @@ fn print_usage() {
          cm absorb --input result.jsonl [--dry-run]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
-         cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--apply]
+         cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--changed] [--strict] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
          cm audit [--root <dir>] [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply]
@@ -1268,57 +1274,74 @@ fn cmd_release(path: &Path, args: &[String]) -> Result<()> {
 
 fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
     let task = arg_value(args, "--task").unwrap_or_else(|| "current".to_string());
-    let summary = arg_value(args, "--summary");
+    let explicit_summary = arg_value(args, "--summary");
     let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
     let apply = has_flag(args, "--apply");
+    let strict = has_flag(args, "--strict");
+    let changed_only = has_flag(args, "--changed");
     let owner = arg_value(args, "--owner");
     let _lock = crate::store::acquire_store_lock(path)?;
     let mut store = Store::open(path)?;
     let (memory, mut frame) = latest_frame(&mut store, Some(&task))?
         .ok_or_else(|| anyhow!("no frame for task {task:?}"))?;
     ensure_frame_owner(&frame, owner.as_deref(), "finish")?;
+    if strict && !frame.open.is_empty() {
+        bail!(
+            "task {:?} still has {} open question(s); resolve them or omit --strict",
+            frame.task,
+            frame.open.len()
+        );
+    }
+    if strict {
+        let audit = run_audit(path, &root, false, false, changed_only, None, None)?;
+        let issue_count = audit["issue_count"].as_u64().unwrap_or(0);
+        if issue_count > 0 {
+            bail!(
+                "task {:?} has {} source issue(s); repair or omit --strict",
+                frame.task,
+                issue_count
+            );
+        }
+    }
+    let summary = explicit_summary
+        .clone()
+        .unwrap_or_else(|| format!("Completed: {}", frame.goal));
     frame.status = "done".to_string();
     frame.owner = None;
     frame.lease_until = None;
     frame.updated_at = crate::model::now_ms();
-    if let Some(summary) = summary.as_deref() {
-        let note = format!("finished: {summary}");
-        if !frame.notes.contains(&note) {
-            frame.notes.push(note);
-        }
+    let note = format!("finished: {summary}");
+    if !frame.notes.contains(&note) {
+        frame.notes.push(note);
     }
     let frame_memory = save_frame(path, &frame, Some(memory.id), "agent:finish", None, true)?;
 
-    let summary_id = if let Some(summary) = summary.as_deref() {
-        let input = AppendInput {
-            kind: "episode".to_string(),
-            scope: arg_value(args, "--scope").unwrap_or_else(|| "repo".to_string()),
-            subject: format!("task:{} summary", frame.task),
-            text: summary.to_string(),
-            source: "agent:finish".to_string(),
-            confidence: 0.9,
-            valid_from: 0,
-            valid_to: None,
-            supersedes: Vec::new(),
-            conflict_of: None,
-            trust: Some("authored".to_string()),
-            source_commit: None,
-        };
-        let summary_memory = memory_from_input(&input)?;
-        crate::store::append_record_unlocked(
-            path,
-            crate::store::T_MEMORY,
-            &memory_payload(&summary_memory),
-            true,
-        )?;
-        Some(summary_memory.id)
-    } else {
-        None
+    let input = AppendInput {
+        kind: "episode".to_string(),
+        scope: arg_value(args, "--scope").unwrap_or_else(|| "repo".to_string()),
+        subject: format!("task:{} summary", frame.task),
+        text: summary.clone(),
+        source: "agent:finish".to_string(),
+        confidence: 0.9,
+        valid_from: 0,
+        valid_to: None,
+        supersedes: Vec::new(),
+        conflict_of: None,
+        trust: Some("authored".to_string()),
+        source_commit: None,
     };
+    let summary_memory = memory_from_input(&input)?;
+    crate::store::append_record_unlocked(
+        path,
+        crate::store::T_MEMORY,
+        &memory_payload(&summary_memory),
+        true,
+    )?;
+    let summary_id = summary_memory.id;
 
     drop(store);
     drop(_lock);
-    let audit = run_audit(path, &root, apply, false, false, None, None)?;
+    let audit = run_audit(path, &root, apply, false, changed_only, None, None)?;
     let govern = run_govern(path, apply, false, 90, 2, 0.85)?;
     outln!(
         "{}",
@@ -1328,6 +1351,8 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
             "status": frame.status,
             "frame_id": frame_memory.id,
             "summary_id": summary_id,
+            "strict": strict,
+            "changed_only": changed_only,
             "audit": audit,
             "govern": govern
         }))?

@@ -95,7 +95,8 @@ $CM remember --file "$F" --kind decision --scope <scope> \
 - Write at decision time, not as a final memory pass; one decision per record.
 - `remember` skips exact duplicate content in the recent tail/small index and returns the existing ID. Use `--force` only for deliberate duplicates; `append`/`import` never dedupe.
 - Keep text under ~400 chars: what changed, why, file/symbol. No progress logs, timelines, or transcripts.
-- Use `path:symbol` as source for code facts, `agent:<name>` for decisions.
+- Use `path:symbol` as source for code facts, `agent:<name>` for decisions. Add
+  `--verify-source` when the cited symbol must anchor right now.
 - If a later decision invalidates an earlier one, pass `--supersedes <id>`; keep both only on a real conflict (run `cm conflicts`).
 - Never store raw transcripts, secrets, or long code blocks.
 
@@ -141,7 +142,9 @@ negative-feedback memories and exact duplicates, and `--merge` folds
 near-duplicates when applying. `cm audit` checks `path:symbol` sources, including
 the source excerpt hash captured at write time; `--apply` records stale feedback
 for drift. `--refresh` re-anchors reviewed `source_changed` records under new IDs,
-superseding the old records. `cm finish` marks the frame done, writes the summary
-as one episode, and runs audit plus governance.
+superseding the old records. `cm finish` marks the frame done, writes a summary
+episode, and runs audit plus governance. With `--strict` it refuses to finish
+while open questions remain or sources drift; `--changed` limits that audit to
+git-visible changes.
 
 `cm.cache` is disposable; `cm` is the source of truth. Do not keep parallel Markdown memory.
