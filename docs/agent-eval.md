@@ -203,10 +203,10 @@ fresh clones of pi HEAD. Both clones excluded `cm` and temporary fixture files.
 The memory run received a 1,600-token `cm brief` with three-line source
 snippets; the control received only the task text.
 
-| Mode | Tokens | Tool uses | Wall time |
-|---|---:|---:|---:|
-| with cm brief | 182,031 | 11 | 121.9s |
-| without cm | 1,297,004 | 39 | 748.2s |
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| with cm brief | 182,031 | 11 | 121.9s | 3 |
+| without cm | 1,297,004 | 39 | 748.2s | 5 |
 
 That is **-86.0% tokens**, **-71.8% tool uses**, and **-83.7% wall time** in this
 run. Both answers were source-correct in spot review against
@@ -214,7 +214,8 @@ run. Both answers were source-correct in spot review against
 `tokensBefore` (884). The control spent 12.5 minutes discovering the monorepo;
 single-run variance is high, so treat the gap as directional rather than a
 guarantee. The memory run also improved from the earlier 274,591-token pi run
-after source re-anchoring and snippet correction.
+after source re-anchoring and snippet correction. Raw metrics:
+`eval/results/pi-reanchor-ab.json`.
 
 ## What not to claim
 
