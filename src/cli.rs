@@ -2948,9 +2948,10 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
     let query = explicit_query
         .clone()
         .or_else(|| {
-            requested_task
+            frame
                 .as_ref()
-                .and_then(|_| frame.as_ref().and_then(frame_query))
+                .filter(|frame| !frame.task.starts_with("explore:"))
+                .and_then(frame_query)
         })
         .unwrap_or_else(|| {
             format!(

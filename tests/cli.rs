@@ -493,6 +493,10 @@ fn explore_reuses_active_task_frame() {
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).expect("explore json");
     assert_eq!(report["task"], "real-task");
     assert_eq!(report["memories"]["active"], 0);
+    assert!(report["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Ship the real task"));
     fs::remove_dir_all(&dir).ok();
 }
 
