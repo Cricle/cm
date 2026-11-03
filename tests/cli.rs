@@ -1432,6 +1432,27 @@ fn brief_suppresses_repeatedly_wrong_memories() {
 }
 
 #[test]
+fn default_memory_file_is_discovered_from_subdirectory() {
+    let dir = temp_dir("discover");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let nested = dir.join("nested").join("src");
+    fs::create_dir_all(&nested).expect("create nested dirs");
+
+    let status = run(&nested, &["status"]);
+    assert_ok(&status);
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status json");
+    assert_eq!(status["active_total"], 0);
+
+    let init = run(&nested, &["init"]);
+    assert_ok(&init);
+    assert!(nested.join("cm").is_file(), "init must create a local cm");
+    assert!(file.is_file(), "ancestor cm must remain untouched");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn help_mentions_task_affinity() {
     let dir = temp_dir("help");
     let output = run(&dir, &["--help"]);

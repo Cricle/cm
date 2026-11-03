@@ -20,6 +20,10 @@ CM=tools/cm-rs/cm.exe
 F=<path/to/cm>   # memory file, not necessarily cwd/cm
 ```
 
+If `--file` is omitted, existing-store commands use `./cm` or the nearest
+ancestor `cm`. `cm init` creates the local default and does not claim an
+ancestor.
+
 If this skill is unavailable, run `cm skill` or `cm skill --install`.
 
 ## Recall

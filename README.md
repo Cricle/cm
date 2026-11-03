@@ -73,6 +73,10 @@ cm skill [--json] [--install] [--check]
 full text; additional hits are query-focused snippets, so 2–3 related memories
 usually fit in 800 tokens. Use `--full` for complete text on every hit.
 
+When `--file` is omitted, existing-store commands use `./cm` or the nearest
+ancestor `cm`; this lets agents run from a subdirectory. `cm init` creates the
+local default and does not claim an ancestor file.
+
 `--task` is optional and affects only the disposable cache, never ranking. Pass a
 stable id for the current work item (branch, issue, or agent task) so `cm.cache`
 keeps the blocks read by this task; `--scope` remains the durable workspace

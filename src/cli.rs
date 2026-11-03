@@ -363,7 +363,7 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
     match command {
-        "init" => cmd_init(&arg_path(&args), has_flag(&args, "--empty")),
+        "init" => cmd_init(&arg_new_path(&args), has_flag(&args, "--empty")),
         "append" => {
             let input =
                 arg_value(&args, "--json").ok_or_else(|| anyhow!("append requires --json"))?;
@@ -3323,7 +3323,23 @@ fn arg_values(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 fn arg_path(args: &[String]) -> PathBuf {
+    if let Some(file) = arg_value(args, "--file") {
+        return PathBuf::from(file);
+    }
+    find_cm_file().unwrap_or_else(|| PathBuf::from("cm"))
+}
+
+/// Commands that create a new store use the local default; existing-store
+/// commands may discover a `cm` file in an enclosing workspace directory.
+fn arg_new_path(args: &[String]) -> PathBuf {
     PathBuf::from(arg_value(args, "--file").unwrap_or_else(|| "cm".to_string()))
+}
+
+fn find_cm_file() -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    cwd.ancestors()
+        .map(|dir| dir.join("cm"))
+        .find(|candidate| candidate.is_file())
 }
 fn arg_usize(args: &[String], flag: &str, default: usize) -> usize {
     arg_value(args, flag)
