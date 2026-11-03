@@ -163,6 +163,24 @@ Working rule: use direct `remember` for a few symbol-precise facts; use
 `pack → absorb` when compressing many notes or when the agent should not spend
 turns on memory bookkeeping.
 
+## Pi repository A/B
+
+Real repository: `C:\wp\empty\pi`, a large TypeScript monorepo. The memory store
+was seeded with the existing 18-record pi compaction fixture, then both agents
+answered the same question about `findCutPoint`, split-turn summary merge, and
+`tokensBefore`.
+
+| Mode | Tokens | Tool uses | Wall time | Files read |
+|---|---:|---:|---:|---:|
+| with cm brief | 274,591 | 9 | 107.9s | 4 |
+| without cm | 350,430 | 16 | 147.4s | 6 |
+
+The memory path cut tokens by **21.6%**, tool uses by **43.8%**, and wall time by
+**26.8%**. Both answers were source-correct in spot review; the memory path cited
+more exact line ranges. This is the target profile: a real monorepo where the
+memory points at the right compaction/session files instead of re-discovering
+them.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
