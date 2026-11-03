@@ -557,7 +557,7 @@ fn print_usage() {
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
-         cm absorb --input result.jsonl [--dry-run]
+         cm absorb --input result.jsonl [--dry-run] [--replace]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--changed] [--strict] [--apply]
@@ -2634,10 +2634,24 @@ fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp]) -> Result<()> {
     Ok(())
 }
 
-fn absorb_input(op: &AbsorbOp) -> Result<AppendInput> {
+fn absorb_input(path: &Path, op: &AbsorbOp, replace: bool) -> Result<AppendInput> {
     let mut supersedes = op.supersedes.clone();
     if let Some(id) = &op.id {
         supersedes.push(id.clone());
+    }
+    if replace && op.op == "remember" && supersedes.is_empty() {
+        if let Some(existing) = op
+            .kind
+            .as_deref()
+            .zip(op.scope.as_deref())
+            .zip(op.subject.as_deref())
+            .and_then(|((kind, scope), subject)| {
+                crate::store::find_subject_memory(path, scope, kind, subject).ok()
+            })
+            .flatten()
+        {
+            supersedes.push(existing.id);
+        }
     }
     Ok(AppendInput {
         kind: op.kind.clone().unwrap_or_default(),
@@ -2661,10 +2675,10 @@ enum AbsorbOutcome {
     Forgotten,
 }
 
-fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<AbsorbOutcome> {
+fn apply_absorb_op(path: &Path, op: &AbsorbOp, replace: bool) -> Result<AbsorbOutcome> {
     match op.op.as_str() {
         "remember" | "supersede" => {
-            let input = absorb_input(op)?;
+            let input = absorb_input(path, op, replace)?;
             let memory = memory_from_input(&input)?;
             if find_tail_duplicate(path, &memory)?.is_some() {
                 return Ok(AbsorbOutcome::Duplicate);
@@ -2684,6 +2698,7 @@ fn apply_absorb_op(path: &Path, op: &AbsorbOp) -> Result<AbsorbOutcome> {
 fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
     let dry_run = has_flag(args, "--dry-run");
+    let replace = has_flag(args, "--replace");
     let content = if input == "-" {
         io::read_to_string(io::stdin())?
     } else {
@@ -2698,7 +2713,7 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     let mut forgotten = 0usize;
     if !dry_run {
         for op in &ops {
-            match apply_absorb_op(path, op)? {
+            match apply_absorb_op(path, op, replace)? {
                 AbsorbOutcome::Written => written += 1,
                 AbsorbOutcome::Duplicate => duplicates += 1,
                 AbsorbOutcome::Forgotten => forgotten += 1,

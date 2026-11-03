@@ -1144,6 +1144,63 @@ fn brief_resumes_current_frame_with_budgeted_context() {
 }
 
 #[test]
+fn absorb_replace_supersedes_same_subject() {
+    let dir = temp_dir("absorb-replace");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--kind",
+            "decision",
+            "--subject",
+            "cache policy",
+            "--text",
+            "Cache protects the active scope first.",
+            "--scope",
+            "repo",
+            "--source",
+            "src/cache.rs:rank_for",
+        ],
+    );
+    assert_ok(&remembered);
+    let evidence = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let result = format!(
+        "{{\"op\":\"remember\",\"kind\":\"decision\",\"scope\":\"repo\",\"subject\":\"cache policy\",\"text\":\"Cache protects the active scope, then uses TinyLFU admission.\",\"source\":\"agent:llm\",\"evidence\":[\"{evidence}\"]}}\n"
+    );
+    let result_path = dir.join("replace.jsonl");
+    fs::write(&result_path, result).expect("write replace result");
+    let absorb = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+            "--replace",
+        ],
+    );
+    assert_ok(&absorb);
+    let report: serde_json::Value = serde_json::from_slice(&absorb.stdout).expect("absorb json");
+    assert_eq!(report["written"], 1);
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    let output = String::from_utf8_lossy(&scan.stdout);
+    assert_eq!(output.lines().count(), 1);
+    assert!(output.contains("TinyLFU admission"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn pack_and_absorb_compress_memories() {
     let dir = temp_dir("pack-absorb");
     let file = dir.join("cm");
