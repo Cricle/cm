@@ -98,6 +98,9 @@ $CM remember --file "$F" --kind decision --scope <scope> \
 - Use `path:symbol` as source for code facts, `agent:<name>` for decisions. Add
   `--verify-source` when the cited symbol must anchor right now.
 - If a later decision invalidates an earlier one, pass `--supersedes <id>`; keep both only on a real conflict (run `cm conflicts`).
+- To update a decision you just wrote, `remember --replace` supersedes the latest
+  active record with the same `scope+kind+subject`; prefer it over creating a
+  same-subject conflict.
 - Never store raw transcripts, secrets, or long code blocks.
 
 ## Compress

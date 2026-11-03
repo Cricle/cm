@@ -53,7 +53,7 @@ remains the project-local installation path.
 ## Everyday use
 
 ```text
-cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force] [--verify-source]
+cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force] [--verify-source] [--replace]
 cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
@@ -113,7 +113,9 @@ small indexes (≤10k docs), active index records. A duplicate returns the exist
 ID with `"duplicate": true` instead of appending. Use `--force` for a deliberate
 duplicate; `append`/`import` never deduplicate. Large indexes use the cheap
 tail-only check to avoid decoding every record on each write. `--verify-source`
-refuses a `path:symbol` source that cannot be anchored right now.
+refuses a `path:symbol` source that cannot be anchored right now. `--replace`
+supersedes the latest active record with the same `scope+kind+subject`, which is
+the safe way to update a decision instead of creating a conflict.
 
 `doctor` emits one compact JSON health line; `--strict` exits 1 when it reports a
 problem. `cache-stats` reports cache capacity, data/index entries, hits, misses,

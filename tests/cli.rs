@@ -776,6 +776,68 @@ fn remember_verify_source_rejects_bad_anchor() {
 }
 
 #[test]
+fn remember_replace_supersedes_same_subject() {
+    let dir = temp_dir("remember-replace");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let first = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--kind",
+            "decision",
+            "--subject",
+            "cache policy",
+            "--text",
+            "Cache protects the active scope first.",
+            "--scope",
+            "repo",
+            "--source",
+            "src/cache.rs:rank_for",
+        ],
+    );
+    assert_ok(&first);
+    let first_id = serde_json::from_slice::<serde_json::Value>(&first.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let replaced = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--kind",
+            "decision",
+            "--subject",
+            "cache policy",
+            "--text",
+            "Cache protects the active scope, then uses TinyLFU admission.",
+            "--scope",
+            "repo",
+            "--source",
+            "src/cache.rs:rank_for",
+            "--replace",
+        ],
+    );
+    assert_ok(&replaced);
+    let replaced: serde_json::Value =
+        serde_json::from_slice(&replaced.stdout).expect("replace json");
+    assert_ne!(replaced["id"].as_str().unwrap(), first_id);
+    assert_eq!(replaced["supersedes"][0], first_id);
+    let doctor = run(&dir, &["doctor", "--strict", "--file", file_arg]);
+    assert_ok(&doctor);
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    assert_eq!(String::from_utf8_lossy(&scan.stdout).lines().count(), 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn governance_merges_near_duplicates() {
     let dir = temp_dir("merge");
     let file = dir.join("cm");

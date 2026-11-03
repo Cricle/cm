@@ -1246,6 +1246,7 @@ mod cli_tests {
             &test_input("dedup subject", "Dedup Body"),
             true,
             false,
+            false,
         )
         .expect("first remember");
         let first_id = {
@@ -1258,6 +1259,7 @@ mod cli_tests {
             &test_input("dedup subject", "dedup   body"),
             true,
             false,
+            false,
         )
         .expect("tail duplicate");
         assert_eq!(test_active_total(&path), 1);
@@ -1266,6 +1268,7 @@ mod cli_tests {
             &path,
             &test_input("dedup subject", "dedup body"),
             true,
+            false,
             false,
         )
         .expect("index duplicate");
@@ -1279,6 +1282,7 @@ mod cli_tests {
             &test_input("dedup subject", "dedup body"),
             true,
             true,
+            false,
         )
         .expect("force duplicate");
         assert_eq!(test_active_total(&path), 2);

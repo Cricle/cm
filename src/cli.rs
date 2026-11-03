@@ -390,6 +390,10 @@ pub fn run() -> Result<()> {
                 trust: arg_value(&args, "--trust"),
                 source_commit: arg_value(&args, "--source-commit"),
             };
+            let replace = has_flag(&args, "--replace");
+            if replace && has_flag(&args, "--force") {
+                bail!("--replace and --force are mutually exclusive");
+            }
             if has_flag(&args, "--verify-source")
                 && source_parts(&input.source).is_some()
                 && source_anchor(&input.source).is_none()
@@ -401,6 +405,7 @@ pub fn run() -> Result<()> {
                 &input,
                 has_flag(&args, "--durable"),
                 has_flag(&args, "--force"),
+                replace,
             )
         }
         "recall" => {
@@ -542,7 +547,7 @@ fn print_usage() {
     println!(
         "cm 1.0.0 - compact memory for AI agents
          
-         cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored] [--verify-source]
+         cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored] [--verify-source] [--replace]
          cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800]
          cm forget --file cm --id <id>
          cm status [--file cm]
@@ -662,10 +667,18 @@ pub(crate) fn cmd_remember_input(
     input: &AppendInput,
     durable: bool,
     force: bool,
+    replace: bool,
 ) -> Result<()> {
     validate_input(input)?;
     read_header_file(path)?;
-    let memory = memory_from_input(input)?;
+    let mut memory = memory_from_input(input)?;
+    if replace && memory.supersedes.is_empty() {
+        if let Some(existing) =
+            crate::store::find_subject_memory(path, &memory.scope, &memory.kind, &memory.subject)?
+        {
+            memory.supersedes = vec![existing.id.clone()];
+        }
+    }
     if !force {
         if let Some(id) = find_tail_duplicate(path, &memory)? {
             outln!("{}", json!({"ok": true, "id": id, "duplicate": true}));
@@ -673,7 +686,14 @@ pub(crate) fn cmd_remember_input(
         }
     }
     append_record(path, 2, &memory_payload(&memory), durable)?;
-    outln!("{}", json!({"ok": true, "id": memory.id}));
+    outln!(
+        "{}",
+        json!({
+            "ok": true,
+            "id": memory.id,
+            "supersedes": memory.supersedes
+        })
+    );
     Ok(())
 }
 

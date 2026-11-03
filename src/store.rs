@@ -1332,6 +1332,42 @@ pub(crate) fn find_tail_duplicate(path: &Path, target: &Memory) -> Result<Option
     Ok(None)
 }
 
+pub(crate) fn find_subject_memory(
+    path: &Path,
+    scope: &str,
+    kind: &str,
+    subject: &str,
+) -> Result<Option<Memory>> {
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let header = read_current_header(&mmap)?;
+    let records = read_records_from(&mmap, header.tail_start as usize)?;
+    for doc in active_docs(&records)? {
+        if doc.memory.scope == scope && doc.memory.kind == kind && doc.memory.subject == subject {
+            return Ok(Some(doc.memory));
+        }
+    }
+    if header.doc_count > 0 && header.doc_count <= 10_000 {
+        let mut store = Store::open(path)?;
+        let tail = store.tail_view()?;
+        for idx in 0..store.doc_count() {
+            if !store.is_active(idx)? {
+                continue;
+            }
+            let meta = store.doc_meta(idx)?;
+            let memory = store.doc_memory(&meta)?;
+            if !tail.hidden.contains(&memory.id)
+                && memory.scope == scope
+                && memory.kind == kind
+                && memory.subject == subject
+            {
+                return Ok(Some(memory));
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn read_header_file(path: &Path) -> Result<Header> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut bytes = [0u8; DUAL_HEADER_LEN];
