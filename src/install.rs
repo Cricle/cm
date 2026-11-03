@@ -523,6 +523,8 @@ fn remove_exe(home: &Path, record: &ExeRecord) -> Result<()> {
 
 fn set_path(home: &Path, bin_dir: &Path, add: bool) -> Result<bool> {
     let _ = home;
+    #[cfg(not(windows))]
+    let _ = bin_dir;
     #[cfg(windows)]
     {
         let script = if add {
