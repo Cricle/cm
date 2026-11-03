@@ -261,6 +261,19 @@ still negative for one question and only amortizes across many follow-ups or a
 long coding task. The small config_refactor multi-session result remains a
 separate, also-marginal data point.
 
+## Dynamic explore e2e
+
+Fresh pi clone with an empty `cm`; command used exactly `cm explore --file cm
+--root .` (no mode, record, or budget flags). It selected **macro** and
+`MAX_RECORDS: 14`; the model returned 14 records, `cm explore --apply` accepted
+and wrote all 14, and `audit --strict` checked 14 with 0 issues.
+
+A new `src/probe.rs` was then added. The same command selected **micro** with
+`MAX_RECORDS: 7`; the model returned one delta record, apply accepted it, audit
+checked 15 with 0 issues, and `doctor --strict` finished at 16 active records
+including the exploration frame. This verifies the simple dynamic path end to
+end. Raw metrics: `eval/results/dynamic-explore-e2e.json`.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;

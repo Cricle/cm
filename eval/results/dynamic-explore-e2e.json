@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-04",
+  "repo": "fresh pi clone",
+  "command": "cm explore --file cm --root .",
+  "macro": {
+    "mode": "macro",
+    "max_records": 14,
+    "returned_records": 14,
+    "apply": "accepted 14, written 14",
+    "audit": "14 checked, 0 issues",
+    "agent_tokens": 2476848,
+    "agent_tool_uses": 76,
+    "agent_duration_ms": 517650
+  },
+  "micro": {
+    "trigger": "added src/probe.rs after the macro store existed",
+    "mode": "micro",
+    "max_records": 7,
+    "returned_records": 1,
+    "apply": "accepted 1, written 1",
+    "audit": "15 checked, 0 issues",
+    "agent_tokens": 142974,
+    "agent_tool_uses": 7,
+    "agent_duration_ms": 45924
+  },
+  "final": {
+    "active_total": 16,
+    "doctor_strict": "ok",
+    "full_checksum": true
+  },
+  "notes": "No --mode, --max-items, or --budget flags were used. The simple command selected macro for the empty store and micro after a new source file changed the working tree."
+}
