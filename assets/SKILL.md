@@ -120,6 +120,9 @@ $CM absorb --file "$F" --input result.jsonl --dry-run
 $CM absorb --file "$F" --input result.jsonl --replace
 ```
 
+Use `--allow-long-text` only when re-anchoring existing records that exceed the
+normal compression limit.
+
 `absorb` accepts only `remember`, `supersede`, and `forget`; every write needs
 evidence IDs from the pack and a real `path:symbol` or `agent:<name>` source.
 Exact duplicates are detected and skipped. The model proposes; `cm` verifies and

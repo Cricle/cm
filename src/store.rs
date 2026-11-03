@@ -1311,7 +1311,7 @@ pub(crate) fn find_tail_duplicate(path: &Path, target: &Memory) -> Result<Option
     let records = read_records_from(&mmap, header.tail_start as usize)?;
     let target_hash = content_hash(target);
     for doc in active_docs(&records)? {
-        if content_hash(&doc.memory) == target_hash {
+        if !target.supersedes.contains(&doc.memory.id) && content_hash(&doc.memory) == target_hash {
             return Ok(Some(doc.memory.id));
         }
     }
@@ -1324,7 +1324,10 @@ pub(crate) fn find_tail_duplicate(path: &Path, target: &Memory) -> Result<Option
             }
             let meta = store.doc_meta(idx)?;
             let memory = store.doc_memory(&meta)?;
-            if !tail.hidden.contains(&memory.id) && content_hash(&memory) == target_hash {
+            if !tail.hidden.contains(&memory.id)
+                && !target.supersedes.contains(&memory.id)
+                && content_hash(&memory) == target_hash
+            {
                 return Ok(Some(memory.id));
             }
         }

@@ -1201,6 +1201,148 @@ fn absorb_replace_supersedes_same_subject() {
 }
 
 #[test]
+fn absorb_replace_can_reanchor_identical_text() {
+    let dir = temp_dir("absorb-reanchor");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--kind",
+            "decision",
+            "--subject",
+            "cache policy",
+            "--text",
+            "Cache protects the active scope first.",
+            "--scope",
+            "repo",
+            "--source",
+            "agent:oracle",
+        ],
+    );
+    assert_ok(&remembered);
+    let evidence = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fs::create_dir_all(dir.join("src")).expect("create src");
+    fs::write(
+        dir.join("src/cache.rs"),
+        "pub fn rank_for(scope: &str) -> usize {\n    scope.len()\n}\n",
+    )
+    .expect("write source");
+    let result = format!(
+        "{{\"op\":\"remember\",\"kind\":\"decision\",\"scope\":\"repo\",\"subject\":\"cache policy\",\"text\":\"Cache protects the active scope first.\",\"source\":\"src/cache.rs:rank_for\",\"evidence\":[\"{evidence}\"]}}\n"
+    );
+    let result_path = dir.join("reanchor.jsonl");
+    fs::write(&result_path, result).expect("write reanchor result");
+    let dry = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+            "--replace",
+            "--dry-run",
+        ],
+    );
+    assert_ok(&dry);
+    let report: serde_json::Value = serde_json::from_slice(&dry.stdout).expect("dry-run json");
+    assert_eq!(report["written"], 1);
+    assert_eq!(report["duplicates"], 0);
+    let absorb = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+            "--replace",
+        ],
+    );
+    assert_ok(&absorb);
+    let report: serde_json::Value = serde_json::from_slice(&absorb.stdout).expect("absorb json");
+    assert_eq!(report["written"], 1);
+    assert_eq!(report["duplicates"], 0);
+    let scan = run(&dir, &["scan", "--file", file_arg]);
+    assert_ok(&scan);
+    let output = String::from_utf8_lossy(&scan.stdout);
+    assert_eq!(output.lines().count(), 1);
+    assert!(output.contains("src/cache.rs:rank_for"));
+    assert!(output.contains("Cache protects the active scope first."));
+    assert_ok(&run(&dir, &["doctor", "--strict", "--file", file_arg]));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn absorb_allow_long_text_is_explicit() {
+    let dir = temp_dir("absorb-long");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    let remembered = run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "seed",
+            "--text",
+            "seed memory",
+            "--scope",
+            "repo",
+            "--source",
+            "agent:test",
+        ],
+    );
+    assert_ok(&remembered);
+    let evidence = serde_json::from_slice::<serde_json::Value>(&remembered.stdout)
+        .expect("remember json")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let long_text = "x".repeat(900);
+    let result = format!(
+        "{{\"op\":\"remember\",\"kind\":\"fact\",\"scope\":\"repo\",\"subject\":\"long\",\"text\":\"{long_text}\",\"source\":\"agent:test\",\"evidence\":[\"{evidence}\"]}}\n"
+    );
+    let result_path = dir.join("long.jsonl");
+    fs::write(&result_path, result).expect("write long result");
+    let rejected = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+        ],
+    );
+    assert!(!rejected.status.success(), "long text must require opt-in");
+    let accepted = run(
+        &dir,
+        &[
+            "absorb",
+            "--file",
+            file_arg,
+            "--input",
+            result_path.to_str().unwrap(),
+            "--allow-long-text",
+        ],
+    );
+    assert_ok(&accepted);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn pack_and_absorb_compress_memories() {
     let dir = temp_dir("pack-absorb");
     let file = dir.join("cm");

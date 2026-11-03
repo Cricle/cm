@@ -557,7 +557,7 @@ fn print_usage() {
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
-         cm absorb --input result.jsonl [--dry-run] [--replace]
+         cm absorb --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm claim --task <id>|current --owner <id> [--lease 30]
          cm release --task <id>|current [--owner <id>]
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--changed] [--strict] [--apply]
@@ -2549,7 +2549,7 @@ fn parse_absorb_ops(content: &str) -> Result<Vec<AbsorbOp>> {
     Ok(ops)
 }
 
-fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp]) -> Result<()> {
+fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp], allow_long_text: bool) -> Result<()> {
     let mut superseded = HashSet::new();
     for (index, op) in ops.iter().enumerate() {
         let line = index + 1;
@@ -2593,8 +2593,8 @@ fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp]) -> Result<()> {
                 if scope.starts_with("__cm_") {
                     bail!("line {line}: scope {scope:?} is reserved");
                 }
-                if text.chars().count() > 800 {
-                    bail!("line {line}: text must be <=800 chars");
+                if !allow_long_text && text.chars().count() > 800 {
+                    bail!("line {line}: text must be <=800 chars; pass --allow-long-text to re-anchor existing records");
                 }
                 if op.evidence.is_empty() {
                     bail!("line {line}: evidence is required");
@@ -2709,6 +2709,7 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
     let dry_run = has_flag(args, "--dry-run");
     let replace = has_flag(args, "--replace");
+    let allow_long_text = has_flag(args, "--allow-long-text");
     let content = if input == "-" {
         io::read_to_string(io::stdin())?
     } else {
@@ -2716,7 +2717,7 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     };
     let ops = parse_absorb_ops(&content)?;
     let mut store = Store::open(path)?;
-    validate_absorb_ops(&mut store, &ops)?;
+    validate_absorb_ops(&mut store, &ops, allow_long_text)?;
     drop(store);
     let mut written = 0usize;
     let mut duplicates = 0usize;
@@ -2732,7 +2733,13 @@ fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     } else {
         for op in &ops {
             if matches!(op.op.as_str(), "remember" | "supersede") {
-                written += 1;
+                let input = absorb_input(path, op, replace)?;
+                let memory = memory_from_input(&input)?;
+                if find_tail_duplicate(path, &memory)?.is_some() {
+                    duplicates += 1;
+                } else {
+                    written += 1;
+                }
             } else {
                 forgotten += 1;
             }

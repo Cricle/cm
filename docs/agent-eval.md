@@ -181,6 +181,21 @@ more exact line ranges. This is the target profile: a real monorepo where the
 memory points at the right compaction/session files instead of re-discovering
 them.
 
+## Re-anchoring imported fixtures
+
+The 18 pi fixture records originally carried `agent1-oracle` as their source, so
+they could not pass source audit. A subagent mapped every record to a real
+`path:symbol` anchor and returned 18 `absorb --replace` ops. `--allow-long-text`
+was needed because the original records exceed the normal compression limit.
+
+The first apply exposed a real bug: duplicate detection ran before supersede
+semantics, so identical text plus a new source was reported as 18 duplicates and
+nothing was written. After making duplicate detection ignore records the new
+memory supersedes, `absorb --replace` wrote all 18. `audit --root .` then checked
+18 anchors with **0 issues**, and `doctor --strict` reported 20 active records,
+0 conflicts, 0 expired, full checksum OK. Identical-text re-anchoring is now a
+covered CLI test.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
