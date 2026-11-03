@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-03",
+  "repo": "C:\\wp\\empty\\pi",
+  "task": "Explain pi compaction: findCutPoint oversized user spans, compact summary merge, and context token estimation",
+  "setup": "Two fresh clones of pi HEAD with identical tracked files. Both agents received exactly the same task text and the same cm binary/instructions. Both stores had an active fair-pi frame; the treatment store had 20 user memories plus 4 frames, the control store had only the frame. No brief was pre-injected; agents had to call cm themselves.",
+  "with_cm": {
+    "tokens": 182491,
+    "tool_uses": 13,
+    "duration_ms": 402851,
+    "files_read": 2
+  },
+  "without_cm": {
+    "tokens": 890034,
+    "tool_uses": 28,
+    "duration_ms": 836898,
+    "files_read": 4
+  },
+  "notes": "Equal-tools single run: same prompt, same model, same repo commit, same cm binary. Only the memory store contents differed. Both answers were source-correct in spot review against findValidCutPoints (394), findCutPoint (446), compact (952), and tokensBefore (884). Treat the gap as directional because single-run variance is high."
+}

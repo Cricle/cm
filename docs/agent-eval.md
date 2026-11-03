@@ -163,23 +163,17 @@ Working rule: use direct `remember` for a few symbol-precise facts; use
 `pack → absorb` when compressing many notes or when the agent should not spend
 turns on memory bookkeeping.
 
-## Pi repository A/B
+## Pi prompt-injected demo (not equal-tools)
 
-Real repository: `C:\wp\empty\pi`, a large TypeScript monorepo. The memory store
-was seeded with the existing 18-record pi compaction fixture, then both agents
-answered the same question about `findCutPoint`, split-turn summary merge, and
-`tokensBefore`.
+Real repository: `C:\wp\empty\pi`. An early run precomputed `cm brief` and placed
+it in the memory-side task file; the control received only the task text. This is
+a product-use demo, **not an equal-tools A/B**, and it is not used as the
+primary evidence for memory value.
 
 | Mode | Tokens | Tool uses | Wall time | Files read |
 |---|---:|---:|---:|---:|
-| with cm brief | 274,591 | 9 | 107.9s | 4 |
+| with pre-injected brief | 274,591 | 9 | 107.9s | 4 |
 | without cm | 350,430 | 16 | 147.4s | 6 |
-
-The memory path cut tokens by **21.6%**, tool uses by **43.8%**, and wall time by
-**26.8%**. Both answers were source-correct in spot review; the memory path cited
-more exact line ranges. This is the target profile: a real monorepo where the
-memory points at the right compaction/session files instead of re-discovering
-them.
 
 ## Re-anchoring imported fixtures
 
@@ -196,28 +190,31 @@ memory supersedes, `absorb --replace` wrote all 18. `audit --root .` then checke
 0 conflicts, 0 expired, full checksum OK. Identical-text re-anchoring is now a
 covered CLI test.
 
-## Pi re-anchored brief A/B
+## Pi equal-tools A/B
 
-After re-anchoring and the snippet fixes, the same task was repeated on two
-fresh clones of pi HEAD. Both clones excluded `cm` and temporary fixture files.
-The memory run received a 1,600-token `cm brief` with three-line source
-snippets; the control received only the task text.
+Two fresh clones of pi HEAD with identical tracked files and the same `cm`
+binary available. Both agents received exactly the same task text and the same
+instruction to use the store only if useful. Each store had an active `fair-pi`
+frame. The treatment store contained the 20 re-anchored compaction memories; the
+control store contained only the frame. No brief was pre-injected into either
+task: both agents had to call `cm brief` or `cm recall` themselves.
 
 | Mode | Tokens | Tool uses | Wall time | Files read |
 |---|---:|---:|---:|---:|
-| with cm brief | 182,031 | 11 | 121.9s | 3 |
-| without cm | 1,297,004 | 39 | 748.2s | 5 |
+| with cm memory | 182,491 | 13 | 402.9s | 2 |
+| without cm memory | 890,034 | 28 | 836.9s | 4 |
 
-That is **-86.0% tokens**, **-71.8% tool uses**, and **-83.7% wall time** in this
-run. Both answers were source-correct in spot review against
-`findValidCutPoints` (line 394), `findCutPoint` (446), `compact` (952), and
-`tokensBefore` (884). The control spent 12.5 minutes discovering the monorepo;
-single-run variance is high, so treat the gap as directional rather than a
-guarantee. The memory run also improved from the earlier 274,591-token pi run
-after source re-anchoring and snippet correction. Raw metrics:
-`eval/results/pi-reanchor-ab.json`.
+That is **-79.5% tokens**, **-53.6% tool uses**, **-51.9% wall time**, and
+**-50% files read** in this run. Both answers were source-correct in spot review
+against `findValidCutPoints` (line 394), `findCutPoint` (446), `compact` (952),
+and `tokensBefore` (884). The control spent 13.9 minutes on repository
+discovery. Single-run variance is still high, so treat the gap as directional.
+Raw metrics: `eval/results/pi-equal-tools-ab.json`.
 
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;
 long-horizon task success and source-correctness remain the deciding metrics.
+Only runs with the same task prompt, same model, same repository commit, and the
+same available tools count as A/B evidence. A pre-injected brief is a product
+demo, not an equal-tools comparison, and must not be mixed into the same table.
