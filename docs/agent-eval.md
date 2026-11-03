@@ -235,6 +235,24 @@ gate passes; the efficiency gate does not. Macro exploration needs denser
 per-module coverage before this is a practical memory set.
 Raw metrics: `eval/results/pir-memory-gate.json`.
 
+## Large-repo cross-session pilot (negative)
+
+The pir work also served as a two-session pilot: session 1 built memory (macro
+plus micro gap-fill), session 2 answered one `ToolScheduler` question with the
+persisted store versus a cold clone. The memory build cost 3,348,911 tokens /
+81 tool uses; the session-2 comparison was:
+
+| Session 2 mode | Tokens | Tool uses | Wall time |
+|---|---:|---:|---:|
+| with persisted memory | 986,738 | 35 | 242.4s |
+| cold clone | 983,708 | 22 | 206.4s |
+
+For one question the memory did not pay back at all; it was slightly slower and
+used more tools because the agent still verified source. This is a pilot, not a
+general multi-session claim: the build cost needs many follow-up questions or a
+coding task with repeated resumptions to amortize. The small config_refactor
+multi-session result remains a separate, also-marginal data point.
+
 ## What not to claim
 
 `cm` is a memory sidecar. It does not prove reasoning gains from one A/B run;

@@ -45,5 +45,20 @@
       "duration_ms": 206397
     }
   },
-  "notes": "Second-project correctness gate passes: all five independently authored questions were verified correct. Efficiency gate fails: the 8-record macro memory did not cover 4/5 questions, the answer run used 78 tools, and even the gap-filled q2 run was not cheaper or faster than cold. This project needs denser per-module memories before claiming a practical memory win."
+  "cross_session_pilot": {
+    "session1_memory_build_tokens": 3348911,
+    "session1_memory_build_tool_uses": 81,
+    "session2_with_memory": {
+      "tokens": 986738,
+      "tool_uses": 35,
+      "duration_ms": 242352
+    },
+    "session2_cold": {
+      "tokens": 983708,
+      "tool_uses": 22,
+      "duration_ms": 206397
+    },
+    "verdict": "negative for one follow-up question; build cost must be amortized over more sessions or questions"
+  },
+  "notes": "Second-project correctness gate passes: all five independently authored questions were verified correct. Efficiency gate fails: the 8-record macro memory did not cover 4/5 questions, the answer run used 78 tools, and even the gap-filled q2 run was not cheaper or faster than cold. The two-session pilot was also negative for one follow-up. This project needs denser per-module memories and a multi-question workload before claiming a practical memory win."
 }
