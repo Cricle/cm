@@ -140,7 +140,9 @@ the check proportional to a change set. `--scope` and `--limit` bound
 large-store audits; `--refresh` re-anchors reviewed `source_changed` records
 under new IDs, superseding the old records. `--apply` records stale feedback for
 remaining `missing_source`, `missing_symbol`, or `source_changed` drift, which
-`govern` then surfaces.
+`govern` then surfaces. `--strict` exits non-zero while unresolved issues remain,
+so a CI job or a finish gate can block source drift instead of silently reading
+JSON.
 Source paths are part of the BM25 token stream, so file/symbol queries work
 without embeddings. Read commands may create or update the disposable
 `cm.cache` cache; `cm` remains unchanged.
@@ -168,7 +170,7 @@ cm release --file cm --task <id>|current [--owner <id>]
 cm finish --file cm [--task <id>|current] [--summary <text>] [--root <dir>] [--scope <scope>] [--changed] [--strict] [--apply]
 cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
-cm audit --root <repo> [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--file cm]
+cm audit --root <repo> [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--strict] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
 cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]

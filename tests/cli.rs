@@ -307,6 +307,61 @@ fn audit_detects_source_hash_drift() {
 }
 
 #[test]
+fn audit_strict_fails_until_issues_are_refreshed() {
+    let dir = temp_dir("audit-strict");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    let source = dir.join("src").join("foo.rs");
+    fs::write(&source, "pub fn hello() {\n    println!(\"hi\");\n}\n").expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello",
+            "--text",
+            "hello prints hi",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
+    let root_arg = dir.to_str().unwrap();
+    fs::write(&source, "pub fn hello() {\n    println!(\"bye\");\n}\n").expect("edit source");
+    let dirty = run(
+        &dir,
+        &["audit", "--file", file_arg, "--root", root_arg, "--strict"],
+    );
+    assert!(!dirty.status.success(), "strict audit must fail on drift");
+    let report: serde_json::Value = serde_json::from_slice(&dirty.stdout).expect("audit json");
+    assert_eq!(report["unresolved"], 1);
+    let refreshed = run(
+        &dir,
+        &[
+            "audit",
+            "--file",
+            file_arg,
+            "--root",
+            root_arg,
+            "--refresh",
+            "--strict",
+        ],
+    );
+    assert_ok(&refreshed);
+    let clean = run(
+        &dir,
+        &["audit", "--file", file_arg, "--root", root_arg, "--strict"],
+    );
+    assert_ok(&clean);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn claim_and_release_guard_a_task_frame() {
     let dir = temp_dir("claim");
     let file = dir.join("cm");

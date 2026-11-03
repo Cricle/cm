@@ -563,7 +563,7 @@ fn print_usage() {
          cm finish [--task <id>|current] [--summary <text>] [--root <dir>] [--changed] [--strict] [--apply]
          cm feedback --id <id> [--signal useful|stale|wrong]
          cm govern [--apply] [--merge] [--stale-days 90]
-         cm audit [--root <dir>] [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply]
+         cm audit [--root <dir>] [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--strict]
          cm doctor [--strict] [--file cm]
          cm install [--all|--detected|--agent <id>] [--list] [--no-exe] [--no-path] [--dry-run]
          cm uninstall [--all|--agent <id>] [--keep-exe]
@@ -1896,18 +1896,21 @@ fn cmd_audit(path: &Path, args: &[String]) -> Result<()> {
     let changed = has_flag(args, "--changed");
     let scope = arg_value(args, "--scope");
     let limit = arg_value(args, "--limit").and_then(|value| value.parse::<usize>().ok());
-    outln!(
-        "{}",
-        serde_json::to_string(&run_audit(
-            path,
-            &root,
-            apply,
-            refresh,
-            changed,
-            scope.as_deref(),
-            limit,
-        )?)?
-    );
+    let strict = has_flag(args, "--strict");
+    let report = run_audit(
+        path,
+        &root,
+        apply,
+        refresh,
+        changed,
+        scope.as_deref(),
+        limit,
+    )?;
+    let unresolved = report["unresolved"].as_u64().unwrap_or(0);
+    outln!("{}", serde_json::to_string(&report)?);
+    if strict && unresolved > 0 {
+        bail!("audit found {unresolved} unresolved source issue(s)");
+    }
     Ok(())
 }
 
@@ -2044,9 +2047,11 @@ fn run_audit(
         }
     }
     let total = issues.len();
+    let unresolved = total.saturating_sub(refreshed.len());
     issues.truncate(500);
     Ok(json!({
         "ok": true,
+        "unresolved": unresolved,
         "root": root.display().to_string(),
         "checked": checked,
         "issues": issues,

@@ -152,8 +152,9 @@ when it misled you. `cm govern` is dry-run by default; `--apply` forgets only
 negative-feedback memories and exact duplicates, and `--merge` folds
 near-duplicates when applying. `cm audit` checks `path:symbol` sources, including
 the source excerpt hash captured at write time; `--apply` records stale feedback
-for drift. `--refresh` re-anchors reviewed `source_changed` records under new IDs,
-superseding the old records. `cm finish` marks the frame done, writes a summary
+for drift. `--strict` exits non-zero when unresolved source issues remain, so CI
+or an agent can use it as a gate. `--refresh` re-anchors reviewed
+`source_changed` records under new IDs, superseding the old records. `cm finish` marks the frame done, writes a summary
 episode, and runs audit plus governance. With `--strict` it refuses to finish
 while open questions remain, a touched path has no cited memory, or sources
 drift; `--changed` limits that audit to git-visible changes.
