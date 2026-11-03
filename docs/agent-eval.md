@@ -231,8 +231,13 @@ because the 8 macro memories did not cover four of the five questions. A micro
 gap-fill pass added 8 more memories (16 total, audit 0), but a single-question
 recheck (`ToolScheduler` ordering) still used **986,738 tokens / 35 tools /
 242.4s**, versus **983,708 / 22 / 206.4s** cold. The second-project correctness
-gate passes; the efficiency gate does not. Macro exploration needs denser
-per-module coverage before this is a practical memory set.
+gate passes; the efficiency gate does not.
+
+A second, `ToolScheduler`-specific micro pass added 8 dense records (24 total,
+audit 0). Repeating the same q2 task then used **357,670 tokens / 16 tool uses /
+60.4s**, versus **983,708 / 22 / 206.4s** cold: **-63.6% tokens, -27.3% tool
+uses, -70.7% wall time**, with a correct verifier verdict. The practical fix is
+module-level density, not just raising the macro record count.
 Raw metrics: `eval/results/pir-memory-gate.json`.
 
 ## Large-repo cross-session pilot (negative)
@@ -248,10 +253,13 @@ persisted store versus a cold clone. The memory build cost 3,348,911 tokens /
 | cold clone | 983,708 | 22 | 206.4s |
 
 For one question the memory did not pay back at all; it was slightly slower and
-used more tools because the agent still verified source. This is a pilot, not a
-general multi-session claim: the build cost needs many follow-up questions or a
-coding task with repeated resumptions to amortize. The small config_refactor
-multi-session result remains a separate, also-marginal data point.
+used more tools because the agent still verified source. After the second
+module-density pass, session 2 q2 improved to **357,670 tokens / 16 tools /
+60.4s**, but the total build cost became **5,521,755 tokens / 115 tools** across
+three memory-building passes. The session-2 path is now fast; total cost is
+still negative for one question and only amortizes across many follow-ups or a
+long coding task. The small config_refactor multi-session result remains a
+separate, also-marginal data point.
 
 ## What not to claim
 
