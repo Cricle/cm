@@ -10,7 +10,7 @@ repository = "https://github.com/Cricle/cm"
 homepage = "https://github.com/Cricle/cm"
 keywords = ["memory", "ai", "agent", "cli"]
 categories = ["command-line-utilities", "filesystem"]
-include = ["src/**", "assets/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/**", "tests/**", "assets/**", "docs/**", "Cargo.toml", "README.md", "LICENSE"]
 
 [lib]
 name = "cm_memory"
