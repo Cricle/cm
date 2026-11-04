@@ -1915,6 +1915,59 @@ fn symbol_anchor_accepts_type_method_notation() {
 }
 
 #[test]
+fn recall_json_can_include_source_snippet() {
+    let dir = temp_dir("recall-snippet");
+    let file = dir.join("cm");
+    let file_arg = file.to_str().unwrap();
+    fs::create_dir_all(dir.join("src")).expect("create source tree");
+    fs::write(
+        dir.join("src").join("foo.rs"),
+        "pub fn hello() {\n    println!(\"hi\");\n}\n",
+    )
+    .expect("write source");
+    assert_ok(&run(&dir, &["init", "--file", file_arg, "--empty"]));
+    assert_ok(&run(
+        &dir,
+        &[
+            "remember",
+            "--file",
+            file_arg,
+            "--subject",
+            "hello",
+            "--text",
+            "hello prints hi",
+            "--scope",
+            "repo",
+            "--source",
+            "src/foo.rs:hello",
+        ],
+    ));
+    let recalled = run(
+        &dir,
+        &[
+            "recall",
+            "--file",
+            file_arg,
+            "--query",
+            "hello",
+            "--format",
+            "json",
+            "--snippets",
+            "3",
+            "--root",
+            ".",
+        ],
+    );
+    assert_ok(&recalled);
+    let report: serde_json::Value = serde_json::from_slice(&recalled.stdout).expect("recall json");
+    let snippet = report["memories"][0]["snippet"]
+        .as_str()
+        .expect("snippet field");
+    assert!(snippet.contains("pub fn hello()"), "{snippet}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn brief_suppresses_repeatedly_wrong_memories() {
     let dir = temp_dir("brief-feedback");
     let file = dir.join("cm");

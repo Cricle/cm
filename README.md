@@ -54,7 +54,7 @@ remains the project-local installation path.
 
 ```text
 cm remember --file cm --subject "<subject>" --text "<fact>" [--kind fact] [--scope repo] [--force] [--verify-source] [--replace]
-cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full]
+cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 800] [--full] [--snippets <n>] [--root <dir>]
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
 cm explore --file cm --root .    # auto mode/records/budget
@@ -73,6 +73,9 @@ cm skill [--json] [--install] [--check]
 `recall` returns at most 3 memories and respects the token budget. The first hit is
 full text; additional hits are query-focused snippets, so 2–3 related memories
 usually fit in 800 tokens. Use `--full` for complete text on every hit.
+`--snippets <n>` (with JSON output) inlines the exact source definition around
+each `path:symbol`, so the model can inspect the cited code without a separate
+file read.
 
 When `--file` is omitted, existing-store commands use `./cm` or the nearest
 ancestor `cm`; this lets agents run from a subdirectory. `cm init` creates the
@@ -190,7 +193,7 @@ cm feedback --id <id> [--signal useful|stale|wrong] [--note <text>]
 cm govern [--apply] [--merge] [--stale-days 90] [--wrong-threshold 2] [--file cm]
 cm audit --root <repo> [--changed] [--scope <scope>] [--limit <n>] [--refresh] [--apply] [--strict] [--file cm]
 cm search --file cm --query <text> [--top 8] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-score <score>] [--min-trust <level>] [--include-expired]
-cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json]
+cm context --file cm --query <text> [--budget 2000] [--scope <scope>] [--task <task>] [--kind <kind>] [--min-trust <level>] [--format cmx|json] [--snippets <n>] [--root <dir>]
 cm similar --file cm --id <id> [--top 16] [--scope <scope>]
 cm merge --file cm --sources <id1,id2> [--text <text>]
 cm forget --file cm --id <id>

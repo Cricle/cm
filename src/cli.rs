@@ -135,6 +135,8 @@ pub(crate) struct MemoryOut {
     source_hash: Option<String>,
     #[serde(default)]
     source_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
 }
 
 impl MemoryOut {
@@ -191,6 +193,7 @@ impl From<&crate::model::Memory> for MemoryOut {
             source_commit: memory.source_commit.clone(),
             source_hash: memory.source_hash.clone(),
             source_line: memory.source_line,
+            snippet: None,
         }
     }
 }
@@ -420,6 +423,15 @@ pub fn run() -> Result<()> {
                     frame_query_for_task(&arg_path(&args), task)?
                 }
             };
+            let snippet_lines = arg_usize(&args, "--snippets", 0);
+            let format = arg_value(&args, "--format").unwrap_or_else(|| {
+                if snippet_lines > 0 {
+                    "json".to_string()
+                } else {
+                    "cmx".to_string()
+                }
+            });
+            let root = PathBuf::from(arg_value(&args, "--root").unwrap_or_else(|| ".".to_string()));
             cmd_context(
                 &arg_path(&args),
                 &query,
@@ -429,10 +441,12 @@ pub fn run() -> Result<()> {
                 task,
                 arg_value(&args, "--kind"),
                 Some(arg_value(&args, "--min-trust").unwrap_or_else(|| "authored".to_string())),
-                arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
+                format,
                 arg_usize(&args, "--max-items", 3),
                 arg_f64(&args, "--min-score", 0.0),
                 !has_flag(&args, "--full"),
+                snippet_lines,
+                &root,
             )
         }
         "status" => cmd_verify(&arg_path(&args), false),
@@ -497,6 +511,15 @@ pub fn run() -> Result<()> {
         "context" => {
             let query =
                 arg_value(&args, "--query").ok_or_else(|| anyhow!("context requires --query"))?;
+            let snippet_lines = arg_usize(&args, "--snippets", 0);
+            let format = arg_value(&args, "--format").unwrap_or_else(|| {
+                if snippet_lines > 0 {
+                    "json".to_string()
+                } else {
+                    "cmx".to_string()
+                }
+            });
+            let root = PathBuf::from(arg_value(&args, "--root").unwrap_or_else(|| ".".to_string()));
             cmd_context(
                 &arg_path(&args),
                 &query,
@@ -506,10 +529,12 @@ pub fn run() -> Result<()> {
                 arg_value(&args, "--task"),
                 arg_value(&args, "--kind"),
                 arg_value(&args, "--min-trust"),
-                arg_value(&args, "--format").unwrap_or_else(|| "cmx".to_string()),
+                format,
                 arg_usize(&args, "--max-items", 5),
                 arg_f64(&args, "--min-score", 0.0),
                 has_flag(&args, "--compact"),
+                snippet_lines,
+                &root,
             )
         }
         "similar" => {
@@ -550,7 +575,7 @@ fn print_usage() {
         "cm 1.0.0 - compact memory for AI agents
          
          cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored] [--verify-source] [--replace]
-         cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800]
+         cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800] [--snippets <n>] [--root <dir>]
          cm forget --file cm --id <id>
          cm status [--file cm]
          cm cache-stats [--file cm]
@@ -2250,6 +2275,8 @@ fn cmd_context(
     max_items: usize,
     min_score: f64,
     compact: bool,
+    snippet_lines: usize,
+    root: &Path,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
     let (selected, estimated) = select_context(
@@ -2264,6 +2291,12 @@ fn cmd_context(
             }
         }
         "json" => {
+            let mut memories: Vec<MemoryOut> = selected.iter().map(MemoryOut::from).collect();
+            if snippet_lines > 0 {
+                for (memory, out) in selected.iter().zip(memories.iter_mut()) {
+                    out.snippet = source_snippet(memory, root, snippet_lines);
+                }
+            }
             outln!(
                 "{}",
                 serde_json::to_string(&ContextOut {
@@ -2271,7 +2304,7 @@ fn cmd_context(
                     budget,
                     estimated_tokens: estimated,
                     compact,
-                    memories: selected.iter().map(MemoryOut::from).collect(),
+                    memories,
                 })?
             );
         }
