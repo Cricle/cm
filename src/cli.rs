@@ -602,7 +602,7 @@ fn print_usage() {
     );
 }
 
-pub(crate) fn cmd_init(path: &Path, empty: bool) -> Result<()> {
+pub(crate) fn create_store(path: &Path, empty: bool) -> Result<usize> {
     if path.exists() {
         bail!("file already exists: {}", path.display());
     }
@@ -647,7 +647,9 @@ pub(crate) fn cmd_init(path: &Path, empty: bool) -> Result<()> {
             "读取顺序为 header -> index -> records",
         ),
     ];
-    if !empty {
+    let records = if empty {
+        0
+    } else {
         for (kind, subject, text) in seeds {
             let memory = new_memory(
                 kind,
@@ -666,13 +668,19 @@ pub(crate) fn cmd_init(path: &Path, empty: bool) -> Result<()> {
                 &memory_payload(&memory),
             )?)?;
         }
-    }
+        seeds.len()
+    };
     file.sync_all()?;
     drop(file);
     reindex_file(path)?;
+    Ok(records)
+}
+
+pub(crate) fn cmd_init(path: &Path, empty: bool) -> Result<()> {
+    let records = create_store(path, empty)?;
     outln!(
         "{}",
-        json!({"ok": true, "file": path.display().to_string(), "records": if empty { 0 } else { seeds.len() }})
+        json!({"ok": true, "file": path.display().to_string(), "records": records})
     );
     Ok(())
 }
@@ -3995,7 +4003,7 @@ fn validate_trust(trust: &str) -> Result<()> {
     }
 }
 
-fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
+pub(crate) fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
     validate_input(input)?;
     let trust = input.trust.as_deref().unwrap_or("authored");
     validate_trust(trust)?;
@@ -4040,7 +4048,7 @@ fn validate_memory(kind: &str, scope: &str, subject: &str, text: &str) -> Result
     Ok(())
 }
 
-fn validate_input(input: &AppendInput) -> Result<()> {
+pub(crate) fn validate_input(input: &AppendInput) -> Result<()> {
     validate_memory(&input.kind, &input.scope, &input.subject, &input.text)
 }
 

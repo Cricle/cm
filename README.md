@@ -30,6 +30,31 @@ cm recall --file cm --query "build" --scope repo --budget 500
 cm status --file cm
 ```
 
+## Library
+
+The crate also exposes a small Rust API; the `cm` binary remains the primary
+interface and uses the same store implementation.
+
+```rust
+use cm_memory::{Cm, NewMemory};
+
+let cm = Cm::init("cm", true)?;
+let written = cm.remember(
+    NewMemory::new("decision", "repo", "build command", "Build with cargo build --release.")
+        .source("README.md")
+        .confidence(0.9),
+)?;
+let hits = cm.search("cargo release", 5)?;
+let all = cm.all()?;
+# Ok::<(), anyhow::Error>(())
+```
+
+`Cm::open`, `Cm::get`, `Cm::remember`, `Cm::search`, and `Cm::all` are the
+supported embedding surface. Each handle is cheap and opens the same file per
+operation, so it is safe to create one per request. The on-disk format is the
+same as the CLI; library writes are durable and use the same schema, checksum,
+and duplicate detection.
+
 ## Install skills and binary
 
 ```bash

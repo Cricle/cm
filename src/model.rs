@@ -22,8 +22,9 @@ pub(crate) const F_U64: u8 = 2;
 pub(crate) const F_F64: u8 = 3;
 pub(crate) const F_TEXTS: u8 = 4;
 
+/// A durable memory record returned by the library API.
 #[derive(Clone, Debug)]
-pub(crate) struct Memory {
+pub struct Memory {
     pub id: String,
     pub kind: String,
     pub scope: String,

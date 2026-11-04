@@ -12,6 +12,10 @@ keywords = ["memory", "ai", "agent", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 include = ["src/**", "assets/**", "Cargo.toml", "README.md", "LICENSE"]
 
+[lib]
+name = "cm_memory"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cm"
 path = "src/main.rs"
