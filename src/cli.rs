@@ -563,7 +563,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         "version" | "-V" | "--version" => {
-            outln!("cm 1.0.0");
+            outln!("cm {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         other => bail!("unknown command {other:?}; try cm --help"),
@@ -572,7 +572,7 @@ pub fn run() -> Result<()> {
 
 fn print_usage() {
     println!(
-        "cm 1.0.0 - compact memory for AI agents
+        "cm {} - compact memory for AI agents
          
          cm remember --file cm --subject <subject> --text <text> [--kind fact] [--scope repo] [--source <source>] [--trust authored] [--verify-source] [--replace]
          cm recall --file cm --query <text> [--scope <scope>] [--task <task>] [--budget 800] [--snippets <n>] [--root <dir>]
@@ -598,7 +598,8 @@ fn print_usage() {
          cm uninstall [--all|--agent <id>] [--keep-exe]
          cm skill [--json] [--install] [--check]
          
-         Internal/advanced commands: see README."
+         Internal/advanced commands: see README.",
+        env!("CARGO_PKG_VERSION")
     );
 }
 
