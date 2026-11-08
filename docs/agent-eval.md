@@ -281,3 +281,158 @@ long-horizon task success and source-correctness remain the deciding metrics.
 Only runs with the same task prompt, same model, same repository commit, and the
 same available tools count as A/B evidence. A pre-injected brief is a product
 demo, not an equal-tools comparison, and must not be mixed into the same table.
+
+## Production content A/B (2026-11-07)
+
+Two production artifacts were tested with the same Explore agent, same task
+text, and the same tools. Values are per-task medians. Three wiki tasks and the
+cache memory task have three paired runs; modes, extensions, frames, and store
+have one. Medians are primary because one core treatment run was a long outlier.
+
+### Production memory (`C:\wp\empty\cm`)
+
+| Task | Mode | Tokens | Tool uses | Wall time | Correct |
+|---|---|---:|---:|---:|---:|
+| cache/affinity/audit (N=3) | with brief | 473,118 | 27 | 284.6s | yes |
+| cache/affinity/audit (N=3) | control | 1,011,000 | 31 | 279.2s | yes |
+| frames/brief/governance (N=1) | with brief | 192,941 | 15 | 177.6s | yes |
+| frames/brief/governance (N=1) | control | 624,591 | 31 | 328.3s | yes |
+| store/index/audit (N=1) | with brief | 683,676 | 15 | 258.0s | yes |
+| store/index/audit (N=1) | control | 1,336,412 | 48 | 387.9s | yes |
+
+Average of per-task median deltas: **-57.0% tokens**, **-44.4% tool uses**,
+**-25.8% wall time**, with source-correct answers.
+
+### Production wiki (`wiki-v10`, one page)
+
+| Task | Mode | Tokens | Tool uses | Wall time | Correct |
+|---|---|---:|---:|---:|---:|
+| core compaction/retry/queues (N=5) | wiki | 555,323 | 28 | 156.8s | yes |
+| core compaction/retry/queues (N=5) | control | 657,422 | 28 | 198.3s | yes |
+| pi-ai providers/auth (N=3) | wiki | 521,505 | 17 | 240.1s | yes |
+| pi-ai providers/auth (N=3) | control | 871,434 | 31 | 267.5s | yes |
+| pi-durable storage (N=3) | wiki | 330,284 | 15 | 204.4s | yes |
+| pi-durable storage (N=3) | control | 1,016,161 | 35 | 317.7s | yes |
+| modes/RPC (N=1) | wiki | 183,758 | 14 | 99.1s | yes |
+| modes/RPC (N=1) | control | 337,907 | 21 | 168.8s | yes |
+| extensions (N=1) | wiki | 326,069 | 18 | 111.1s | yes |
+| extensions (N=1) | control | 694,125 | 19 | 269.7s | yes |
+
+Average of per-task median deltas: **-44.4% tokens**, **-28.2% tool uses**,
+**-33.4% wall time**, with source-correct answers in every run.
+
+The core task is the noisiest: N=5, with one severe outlier (1.42M tokens, 403s).
+Its median still shows a -15.5% token gain but tool use is flat; the other task
+types are consistently positive. This is why the aggregate uses medians and why
+repeated runs matter.
+
+### Failure mode: multiple pages
+
+Giving both `providers.md` and `auth.md` for one broad task:
+
+| Mode | Tokens | Tool uses | Wall time |
+|---|---:|---:|---:|
+| two wiki pages | 1,831,138 | 43 | 299.8s |
+| no wiki | 689,602 | 27 | 157.2s |
+
+That is **+165.5% tokens**, **+59.3% tool uses**, **+90.7% wall time**. The wiki
+is a single-page routing aid, not a multi-page context dump.
+
+Conclusion: use exactly one focused page, or a compact pointer summary. This is
+why `cm wiki remember` stores a short pointer record rather than copying page
+prose into `cm`, and why `cm wiki check` enforces the per-page word budget.
+
+Caveat: per-task N is 3 for three wiki tasks and the cache memory task; other
+tasks are N=1. Directions are consistent but not a significance test.
+
+Raw metrics: `eval/results/prod-memory-ab-2026-11-07.json` and
+`eval/results/wiki-production-ab-2026-11-07.json`.
+
+## Wiki section excerpt A/B (2026-11-08)
+
+`cm wiki excerpt --page ... --query ... --budget N --max-sections N` returns the
+page title, introduction, and only the H2 sections selected by query terms. The
+excerpt files were 3.3-4.1 KB (about 445-918 estimated tokens), versus a full
+page of about 19 KB.
+
+Same tasks and control medians as the production wiki A/B; excerpt treatment was
+one run per task.
+
+| Task | Control tokens/tools | Full-page tokens/tools | Excerpt tokens/tools | Excerpt vs control |
+|---|---:|---:|---:|---:|
+| providers/auth | 871,434 / 31 | 521,505 / 17 | 451,920 / 17 | -48.1% tokens |
+| durable storage | 1,016,161 / 35 | 330,284 / 15 | 394,028 / 11 | -61.2% tokens |
+| modes/RPC | 214,565 / 12 | 183,758 / 14 | 296,181 / 27 | **+38.0% tokens** |
+| extensions | 287,231 / 11 | 326,069 / 18 | 1,059,730 / 33 | **+269% tokens** |
+| pi-ai auth | 220,655 / 17 | 286,630 / 23 | 250,588 / 20 | **+13.6% tokens** |
+| pi-tui components | 1,552,939 / 64 | 1,718,004 / 62 | 1,276,268 / 48 | **-17.8% tokens** |
+
+The core task initially failed the excerpt strategy when routed to the core
+module page: its needed material is spread across `State and lifecycle`,
+`Failure modes`, and `Key types`, and that page has no dedicated
+compaction/retry section. Two runs used 831k and 995k tokens versus a 657k
+control median. The failure was page selection, not section extraction: `cm wiki
+find --query "compaction retry queued messages failure recovery"` ranks
+`key-flows` first, and excerpting its `Failure and recovery` section used 458k
+tokens / 28 tools / 107.3s versus 657k / 28 / 198.3s — **-30.3% tokens, -45.9%
+wall time**.
+
+Conclusion: format depends on task size and page structure. Small tasks (auth)
+are best answered from source directly. Full page is the robust default for
+medium/large module pages, positive on core/providers/storage/modes/extensions
+and negative on auth/tui. Excerpt wins when the page has a dedicated section
+matching the query (providers, storage, key-flows core, tui); it loses on generic
+sections (modes, extensions) and small tasks (auth). Use `find -> excerpt` only
+when the topic maps cleanly to a section; otherwise use one full page, and skip
+wiki entirely for small tasks. Metadata:
+`eval/results/wiki-excerpt-ab-2026-11-08.json`.
+
+## Automatic wiki route policy (2026-11-08)
+
+`cm wiki route` combines `find` and `excerpt` and returns
+`mode: none|excerpt|full`, the selected page/section, token estimate, reasons,
+and the top candidates.
+
+Policy:
+
+1. no page match or top score < 20 -> `none`
+2. `--task-size small` -> `none`
+3. a selected non-generic H2 heading matches a query term -> `excerpt`
+4. otherwise -> one `full` page
+
+Measured decisions against the A/B best format:
+
+| Query | Route | Best measured |
+|---|---|---|
+| compaction/retry/queues | excerpt key-flows | excerpt |
+| provider composition/auth | excerpt providers | excerpt |
+| durable storage | full storage | full (excerpt close) |
+| modes/RPC | full modes | full |
+| extensions | full extensions | full |
+| credential resolution (small) | excerpt auth; `--task-size small` -> none | none |
+| TUI rendering/input | excerpt tui | excerpt |
+
+So the route matches 6/7 automatically; the small-task case needs
+`--task-size small`. The policy deliberately prefers one full page when only
+generic sections match, because excerpts of generic sections were worse than
+full pages in the measured cases.
+
+## End-to-end `cm wiki route` A/B (2026-11-08)
+
+Treatment ran one `cm wiki route` command, then answered from its output plus
+source verification. Control had no wiki. Route decisions were automatic; the
+small-task auth run used `--task-size small`.
+
+| Task | Route mode | Control tokens/tools | Route tokens/tools | Delta |
+|---|---|---:|---:|---:|
+| core compaction/retry/queues | excerpt | 657,422 / 28 | 746,879 / 23 | +13.6% tokens, -17.9% tools, -27.7% wall |
+| durable storage | full | 1,016,161 / 35 | 397,018 / 10 | -60.9% tokens, -71.4% tools, -64.3% wall |
+| pi-ai auth (small) | none | 220,655 / 17 | 180,021 / 13 | -18.4% tokens, -23.5% tools, -31.8% wall |
+
+Average: **-21.9% tokens**, **-37.6% tool uses**, **-41.3% wall time**. The core
+task paid one extra tool turn for the route command, so its token count rose,
+but it still used fewer tools and less wall time. Storage and small-task routing
+were strongly positive.
+
+Rule: `cm wiki route` is the default entry. Use `--task-size small` for narrow
+single-module questions; otherwise let the route choose excerpt vs full.

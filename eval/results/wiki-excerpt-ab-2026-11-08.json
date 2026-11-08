@@ -1,0 +1,183 @@
+{
+  "date": "2026-11-08",
+  "repo": "C:/wp/empty/pi",
+  "wiki": "C:/wp/empty/wiki-v10",
+  "method": "Treatment received cm wiki excerpt output (title + intro + top H2 sections) as a file; control and full-page medians are the same-task results from the production wiki A/B. Excerpt runs are N=1.",
+  "runs": {
+    "core": {
+      "excerpts": [
+        {
+          "control_tokens": 657422,
+          "control_tools": 28,
+          "control_ms": 198302,
+          "treat_tokens": 831179,
+          "treat_tools": 36,
+          "treat_ms": 222136,
+          "sections": [
+            "State and lifecycle",
+            "Failure modes",
+            "Key types and data"
+          ]
+        },
+        {
+          "control_tokens": 657422,
+          "control_tools": 28,
+          "control_ms": 198302,
+          "treat_tokens": 994883,
+          "treat_tools": 30,
+          "treat_ms": 239461,
+          "sections": [
+            "State and lifecycle"
+          ]
+        }
+      ],
+      "conclusion": "Excerpt is worse than control and worse than the full page on this broad task; the page has no dedicated compaction/retry section, so section selection adds context without enough navigation value."
+    },
+    "providers": {
+      "control_tokens": 871434,
+      "control_tools": 31,
+      "control_ms": 267548,
+      "full_page_tokens": 521505,
+      "full_page_tools": 17,
+      "full_page_ms": 240094,
+      "excerpt_tokens": 451920,
+      "excerpt_tools": 17,
+      "excerpt_ms": 158766,
+      "excerpt_tokens_used": 445,
+      "excerpt_sections": [
+        "Authentication resolution patterns"
+      ],
+      "conclusion": "Excerpt beats control by -48.1% tokens and beats the full page on tokens and wall time."
+    },
+    "storage": {
+      "control_tokens": 1016161,
+      "control_tools": 35,
+      "control_ms": 317693,
+      "full_page_tokens": 330284,
+      "full_page_tools": 15,
+      "full_page_ms": 204387,
+      "excerpt_tokens": 394028,
+      "excerpt_tools": 11,
+      "excerpt_ms": 190720,
+      "excerpt_tokens_used": 918,
+      "excerpt_sections": [
+        "Failure modes and recovery",
+        "Source table",
+        "State, lifecycle, and durability"
+      ],
+      "conclusion": "Excerpt beats control by -61.2% tokens and cuts tool uses versus both control and full page; token count is slightly above the full-page median but wall time is lower."
+    },
+    "core_keyflows": {
+      "control_tokens": 657422,
+      "control_tools": 28,
+      "control_ms": 198302,
+      "excerpt_tokens": 458228,
+      "excerpt_tools": 28,
+      "excerpt_ms": 107294,
+      "excerpt_tokens_used": 692,
+      "excerpt_sections": [
+        "Failure and recovery: retry, overflow, compaction"
+      ],
+      "delta_pct": {
+        "tokens": -30.3,
+        "tools": 0.0,
+        "wall": -45.9
+      },
+      "conclusion": "Routing the same question to key-flows instead of the core module page makes the excerpt useful."
+    },
+    "modes": {
+      "control_tokens": 214565,
+      "control_tools": 12,
+      "control_ms": 140520,
+      "excerpt_tokens": 296181,
+      "excerpt_tools": 27,
+      "excerpt_ms": 181653,
+      "excerpt_tokens_used": 750,
+      "excerpt_sections": [
+        "Failure modes",
+        "Responsibility"
+      ],
+      "delta_pct": {
+        "tokens": 38.0,
+        "tools": 125.0,
+        "wall": 29.3
+      },
+      "conclusion": "Excerpt worse than direct source reading on this narrow task; full page was better."
+    },
+    "extensions": {
+      "control_tokens": 287231,
+      "control_tools": 11,
+      "control_ms": 127798,
+      "excerpt_tokens": 1059730,
+      "excerpt_tools": 33,
+      "excerpt_ms": 322866,
+      "excerpt_tokens_used": 760,
+      "excerpt_sections": [
+        "Responsibility",
+        "Public interfaces",
+        "State and lifecycle"
+      ],
+      "delta_pct": {
+        "tokens": 269.0,
+        "tools": 200.0,
+        "wall": 152.7
+      },
+      "conclusion": "Excerpt much worse; the selected generic sections added context without replacing exploration. Full page was better."
+    },
+    "auth": {
+      "control_tokens": 220655,
+      "control_tools": 17,
+      "control_ms": 99947,
+      "full_tokens": 286630,
+      "full_tools": 23,
+      "full_ms": 115728,
+      "excerpt_tokens": 250588,
+      "excerpt_tools": 20,
+      "excerpt_ms": 112321,
+      "excerpt_tokens_used": 740,
+      "excerpt_sections": [
+        "Resolution and login flows",
+        "Failure modes"
+      ],
+      "delta_full_pct": {
+        "tokens": 29.9,
+        "tools": 35.3,
+        "wall": 15.8
+      },
+      "delta_excerpt_pct": {
+        "tokens": 13.6,
+        "tools": 17.6,
+        "wall": 12.4
+      },
+      "conclusion": "Small task: direct source reading beats both full page and excerpt."
+    },
+    "tui": {
+      "control_tokens": 1552939,
+      "control_tools": 64,
+      "control_ms": 193650,
+      "full_tokens": 1718004,
+      "full_tools": 62,
+      "full_ms": 279882,
+      "excerpt_tokens": 1276268,
+      "excerpt_tools": 48,
+      "excerpt_ms": 203999,
+      "excerpt_tokens_used": 738,
+      "excerpt_sections": [
+        "Rendering and interaction flow",
+        "Failure modes and recovery"
+      ],
+      "delta_full_pct": {
+        "tokens": 10.6,
+        "tools": -3.1,
+        "wall": 44.5
+      },
+      "delta_excerpt_pct": {
+        "tokens": -17.8,
+        "tools": -25.0,
+        "wall": 5.3
+      },
+      "conclusion": "Large task with a dedicated flow section: excerpt is the best format; full page still beats control on tools but not tokens/wall."
+    }
+  },
+  "summary": "The format depends on task size and page structure. Direct source is best on small tasks (auth). Full page is the robust default for medium/large module pages (positive on core/providers/storage/modes/extensions, negative on auth/tui). Section excerpt wins when the page has a dedicated section matching the query (providers, storage, key-flows core, tui); it loses on generic sections (modes, extensions) and small tasks (auth)."
+}

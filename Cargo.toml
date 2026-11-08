@@ -1,6 +1,6 @@
 [package]
 name = "cm-memory"
-version = "0.1.0-rc.1"
+version = "0.0.2"
 edition = "2021"
 description = "Single-file compressed project memory for coding agents"
 license = "MIT"
@@ -10,7 +10,11 @@ repository = "https://github.com/Cricle/cm"
 homepage = "https://github.com/Cricle/cm"
 keywords = ["memory", "ai", "agent", "cli"]
 categories = ["command-line-utilities", "filesystem"]
-include = ["src/**", "tests/**", "assets/**", "docs/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/**", "tests/**", "assets/**", "docs/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[features]
+default = ["cli"]
+cli = []
 
 [lib]
 name = "cm_memory"
@@ -19,6 +23,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "cm"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 anyhow = "1"

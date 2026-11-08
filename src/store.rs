@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
@@ -12,9 +13,83 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::cache::{Cache, CacheStats};
 use crate::model::{
-    content_hash, decode_fields, decode_memory, get_text, kind_id, memory_payload, now_ms,
-    tokenize, Memory,
+    content_hash, decode_fields, decode_memory, get_text, kind_id, memory_payload, new_memory,
+    now_ms, tokenize, Memory,
 };
+
+pub(crate) fn create_store(path: &Path, empty: bool) -> Result<usize> {
+    if path.exists() {
+        bail!("file already exists: {}", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let header = Header {
+        created_at: crate::model::now_ms(),
+        block_table_off: HEADER_LEN as u64,
+        block_count: 0,
+        index_off: HEADER_LEN as u64,
+        index_len: 0,
+        index_raw_len: 0,
+        index_hash: 0,
+        data_start: HEADER_LEN as u64,
+        tail_start: HEADER_LEN as u64,
+        doc_count: 0,
+        generation: 0,
+        flags: 0,
+    };
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(&encode_header(&header))?;
+    let seeds = [
+        (
+            "fact",
+            "cm identity",
+            "cm 是单文件压缩 mmap 记忆库，使用 XXH3 校验记录",
+        ),
+        ("decision", "write model", "选择追加写，不做随机索引"),
+        ("decision", "deletion", "删除采用 tombstone 加按需 purge"),
+        (
+            "decision",
+            "merge strategy",
+            "合并使用 BM25 召回候选，MinHash 复核高度相似",
+        ),
+        ("constraint", "format", "不保留 Markdown 作为记忆"),
+        (
+            "procedure",
+            "read order",
+            "读取顺序为 header -> index -> records",
+        ),
+    ];
+    let records = if empty {
+        0
+    } else {
+        for (kind, subject, text) in seeds {
+            let memory = new_memory(
+                kind,
+                "cm",
+                subject,
+                text,
+                "init",
+                1.0,
+                Vec::new(),
+                None,
+                None,
+            );
+            file.write_all(&crate::store::encode_record(
+                2,
+                0,
+                &memory_payload(&memory),
+            )?)?;
+        }
+        seeds.len()
+    };
+    file.sync_all()?;
+    drop(file);
+    reindex_file(path)?;
+    Ok(records)
+}
 
 pub(crate) const HEADER_LEN: usize = 128;
 pub(crate) const DUAL_HEADER_LEN: usize = HEADER_LEN * 2;
@@ -43,7 +118,7 @@ const ZSTD_LEVEL: i32 = 3;
 
 pub(crate) const T_MEMORY: u8 = 2;
 pub(crate) const T_MERGE: u8 = 3;
-const T_TOMBSTONE: u8 = 4;
+pub(crate) const T_TOMBSTONE: u8 = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Header {
@@ -85,6 +160,86 @@ pub(crate) struct Store {
     pub header: Header,
     pub cache: Arc<Mutex<Cache>>,
     index: Index,
+}
+
+/// Options for opening a store through the library API.
+#[derive(Clone, Debug)]
+pub struct StoreOptions {
+    pub read_only: bool,
+    pub lock_timeout: Option<Duration>,
+    pub disk_cache: bool,
+    pub source_policy: SourcePolicy,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            read_only: false,
+            lock_timeout: Some(Duration::from_millis(200)),
+            disk_cache: true,
+            source_policy: SourcePolicy::default(),
+        }
+    }
+}
+
+/// Constrain `source` anchors written through the library.
+#[derive(Clone, Debug)]
+pub struct SourcePolicy {
+    pub root: PathBuf,
+    pub strict: bool,
+}
+
+impl Default for SourcePolicy {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from("."),
+            strict: false,
+        }
+    }
+}
+
+impl SourcePolicy {
+    pub fn check(&self, source: &str) -> Result<()> {
+        if !self.strict || source.is_empty() || source.starts_with("agent:") {
+            return Ok(());
+        }
+        let Some((path, _)) = crate::source::source_parts(source) else {
+            return Ok(());
+        };
+        if path.is_absolute() || source.split(['/', '\\']).any(|part| part == "..") {
+            bail!("source must be a relative path inside the project: {source}");
+        }
+        let root = self
+            .root
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", self.root.display()))?;
+        let joined = root
+            .join(path)
+            .canonicalize()
+            .with_context(|| format!("source does not exist: {source}"))?;
+        if !joined.starts_with(&root) {
+            bail!("source escapes project root: {source}");
+        }
+        Ok(())
+    }
+
+    /// Apply the same policy to every `source` field in a JSONL absorb batch.
+    pub(crate) fn check_absorb(&self, content: &str) -> Result<()> {
+        if !self.strict {
+            return Ok(());
+        }
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("```") {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line)?;
+            if let Some(source) = value.get("source").and_then(serde_json::Value::as_str) {
+                self.check(source)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct TailView {
@@ -640,6 +795,10 @@ fn page_layout(
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, &StoreOptions::default())
+    }
+
+    pub(crate) fn open_with(path: &Path, options: &StoreOptions) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mmap = Arc::new(unsafe { Mmap::map(&file)? });
         let header = read_current_header(&mmap[..])?;
@@ -650,19 +809,23 @@ impl Store {
             bail!("too many blocks for the cache key space");
         }
         // The page table is tiny; index pages themselves stay lazy.
-        let cache = match Cache::open_existing(path, header.index_hash) {
-            Some(cache) => cache,
-            None => match Cache::create(path, header.index_hash) {
-                Ok(cache) => cache,
-                // The cache is disposable: a read must still work when a
-                // concurrent writer replaces it or the directory is
-                // read-only. Retry the open once, then fall back to an
-                // in-process cache.
-                Err(_) => match Cache::open_existing(path, header.index_hash) {
-                    Some(cache) => cache,
-                    None => Cache::memory(header.index_hash)?,
+        let cache = if options.read_only || !options.disk_cache {
+            Cache::memory(header.index_hash)?
+        } else {
+            match Cache::open_existing(path, header.index_hash) {
+                Some(cache) => cache,
+                None => match Cache::create(path, header.index_hash) {
+                    Ok(cache) => cache,
+                    // The cache is disposable: a read must still work when a
+                    // concurrent writer replaces it or the directory is
+                    // read-only. Retry the open once, then fall back to an
+                    // in-process cache.
+                    Err(_) => match Cache::open_existing(path, header.index_hash) {
+                        Some(cache) => cache,
+                        None => Cache::memory(header.index_hash)?,
+                    },
                 },
-            },
+            }
         };
         let cache = Arc::new(Mutex::new(cache));
         let index = Index::from_pages(Arc::clone(&mmap), &header, Some(Arc::clone(&cache)))?;
@@ -1112,6 +1275,7 @@ impl Store {
         })
     }
 
+    #[cfg(feature = "cli")]
     pub(crate) fn scan_page(&mut self, limit: usize, offset: usize) -> Result<Vec<Memory>> {
         let tail = self.tail_view()?;
         let mut skipped = offset;
@@ -1371,6 +1535,7 @@ pub(crate) fn find_subject_memory(
     Ok(None)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn read_header_file(path: &Path) -> Result<Header> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut bytes = [0u8; DUAL_HEADER_LEN];
@@ -2270,6 +2435,10 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Cross-process mutex for writers that can replace `path` by rename.
 /// Readers stay lock-free: rename is atomic, so they observe either version.
 pub(crate) fn acquire_store_lock(path: &Path) -> Result<File> {
+    acquire_store_lock_with(path, None)
+}
+
+pub(crate) fn acquire_store_lock_with(path: &Path, timeout: Option<Duration>) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -2277,8 +2446,24 @@ pub(crate) fn acquire_store_lock(path: &Path) -> Result<File> {
         .write(true)
         .open(lock_path(path))
         .with_context(|| format!("open lock {}", lock_path(path).display()))?;
-    file.lock_exclusive()
-        .with_context(|| format!("lock {}", lock_path(path).display()))?;
+    match timeout {
+        None => {
+            file.lock_exclusive()
+                .with_context(|| format!("lock {}", lock_path(path).display()))?;
+        }
+        Some(limit) => {
+            let start = Instant::now();
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(_) if start.elapsed() >= limit => {
+                        bail!("store busy: {}", path.display());
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+    }
     Ok(file)
 }
 

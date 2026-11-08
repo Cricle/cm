@@ -2077,3 +2077,90 @@ fn help_mentions_task_affinity() {
     assert!(text.contains("--task"), "{text}");
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn wiki_plan_prompt_and_apply_produce_pages_not_outline() {
+    let dir = temp_dir("wiki");
+    fs::create_dir_all(dir.join("src")).expect("src");
+    fs::write(
+        dir.join("README.md"),
+        "# Demo\n\nA demo repository for wiki generation.\n",
+    )
+    .expect("readme");
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("manifest");
+    fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("main");
+
+    let plan = run(&dir, &["wiki", "plan", "--root", ".", "--out", ".cm/wiki"]);
+    assert_ok(&plan);
+    let plan_json: serde_json::Value = serde_json::from_slice(&plan.stdout).expect("plan json");
+    let pages = plan_json["pages"].as_array().expect("pages");
+    assert!(pages.iter().any(|page| page["id"] == "overview"));
+    assert!(pages.iter().any(|page| page["id"] == "architecture"));
+
+    let prompt = run(
+        &dir,
+        &[
+            "wiki", "prompt", "--root", ".", "--out", ".cm/wiki", "--page", "overview",
+        ],
+    );
+    assert_ok(&prompt);
+    let prompt_text = String::from_utf8_lossy(&prompt.stdout);
+    assert!(prompt_text.contains("not an outline"));
+    assert!(prompt_text.contains("800-1500 words"));
+
+    fs::write(
+        dir.join("page.md"),
+        "# Project Overview\n\n\
+Demo is a small Rust repository used to verify the wiki pipeline. Its binary entry point is `src/main.rs:1`, and the overview starts from `README.md` and `Cargo.toml`.\n\n\
+## Purpose\n\n\
+The project exists to exercise deterministic page planning, a prose prompt, page application, and source freshness checks. The generated Markdown is a human-facing artifact and is not stored in cm memory. This matters because documentation and memory have different lifecycles: documentation is regenerated from source, while memory stores decisions and constraints that cannot be recovered from the tree.\n\n\
+## Architecture and data flow\n\n\
+The binary in `src/main.rs` is the only runtime surface in this fixture. Planning scans the repository, prompting selects one page, application validates the page shape and records a source hash, and checking verifies citations and cross-page links. There is no background worker or persistent service, so every stage can be observed from the command line.\n\n\
+```mermaid\n\
+flowchart LR\n\
+  Plan[wiki plan] --> Prompt[wiki prompt]\n\
+  Prompt --> Apply[wiki apply]\n\
+  Apply --> Check[wiki check]\n\
+```\n\n\
+## Build\n\n\
+Run `cargo build` and `cargo test` from the repository root using the `Cargo.toml` manifest. The page remains source-grounded because the manifest records a hash of its target files. If the README, manifest, or source target changes, `cm wiki status` marks the page stale instead of trusting outdated prose. The build contract is deliberately taken from the manifest rather than inferred from the language.\n\n\
+## Failure behavior\n\n\
+A missing target makes the page visibly stale. Generated pages are a separate artifact: deleting `.cm/wiki` only loses documentation, never cm memory or source truth. A failed generation command leaves the previous page untouched and records the page id in the failure report instead of writing partial prose.\n",
+    )
+    .expect("page");
+    let apply = run(
+        &dir,
+        &[
+            "wiki", "apply", "--root", ".", "--out", ".cm/wiki", "--page", "overview", "--input",
+            "page.md",
+        ],
+    );
+    assert_ok(&apply);
+    assert!(dir.join(".cm/wiki/overview.md").is_file());
+    assert!(dir.join(".cm/wiki/index.md").is_file());
+    let status = run(
+        &dir,
+        &["wiki", "status", "--root", ".", "--out", ".cm/wiki"],
+    );
+    assert_ok(&status);
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("status json");
+    assert_eq!(status_json["written"], 1);
+
+    let check = run(&dir, &["wiki", "check", "--root", ".", "--out", ".cm/wiki"]);
+    assert_ok(&check);
+    let strict = run(
+        &dir,
+        &[
+            "wiki", "check", "--root", ".", "--out", ".cm/wiki", "--strict",
+        ],
+    );
+    assert!(
+        !strict.status.success(),
+        "strict check must fail while pages are still planned"
+    );
+}

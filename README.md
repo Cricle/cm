@@ -32,11 +32,17 @@ cm status --file cm
 
 ## Library
 
-The crate also exposes a small Rust API; the `cm` binary remains the primary
-interface and uses the same store implementation.
+The crate also exposes a Rust API; the `cm` binary remains the primary human
+interface and uses the same store implementation. Enabling the library does not
+require the CLI code:
+
+```toml
+[dependencies]
+cm-memory = { version = "0.0.2", default-features = false }
+```
 
 ```rust
-use cm_memory::{Cm, NewMemory};
+use cm_memory::{Cm, NewMemory, RecallQuery};
 
 let cm = Cm::init("cm", true)?;
 let written = cm.remember(
@@ -45,15 +51,33 @@ let written = cm.remember(
         .confidence(0.9),
 )?;
 let hits = cm.search("cargo release", 5)?;
+let context = cm.recall(&RecallQuery {
+    query: "release".to_string(),
+    budget_tokens: 500,
+    ..RecallQuery::default()
+})?;
 let all = cm.all()?;
 # Ok::<(), anyhow::Error>(())
 ```
 
-`Cm::open`, `Cm::get`, `Cm::remember`, `Cm::search`, and `Cm::all` are the
-supported embedding surface. Each handle is cheap and opens the same file per
-operation, so it is safe to create one per request. The on-disk format is the
-same as the CLI; library writes are durable and use the same schema, checksum,
-and duplicate detection.
+The embedding surface covers the full lifecycle:
+
+- memory: `remember`, `get`, `all`, `search`, `search_query`, `recall`
+- task context: `brief`, `brief_for`, `brief_with_query`, `frame_set`,
+  `frame_get`, `frames`, `claim`, `release`, `finish`
+- governance: `forget`, `merge`, `feedback`, `absorb`
+- exploration: `explore_plan`, `mechanical_explore`, `explore_cursor`,
+  `set_explore_cursor`, `explore_cursor_for`
+- maintenance: `status`, `checkpoint`, `reindex`, `verify`, `export_jsonl`,
+  `import_jsonl`
+
+`Cm::open_with(StoreOptions { .. })` supports read-only stores, a bounded lock
+timeout, an in-memory or disk cache, and a strict source policy that rejects
+absolute paths, `..` escapes, and paths outside the project root. Writes are
+read-modify-write safe under one file lock; the default lock timeout is 200 ms.
+Each handle is cheap and opens the same file per operation, so it is safe to
+create one per request. The on-disk format is the same as the CLI; library
+writes are durable and use the same schema, checksum, and duplicate detection.
 
 ## Install skills and binary
 
@@ -83,6 +107,11 @@ cm recall --file cm --query "<text>" --task <task> [--scope <scope>] [--budget 8
 cm recall --file cm --task <task>    # query comes from the task frame
 cm brief --file cm [--task <task>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
 cm explore --file cm --root .    # auto mode/records/budget
+cm explore --file cm --root . --mechanical --apply  # no-LLM deterministic map
+cm wiki plan --root . --out .cm/wiki
+cm wiki prompt --page overview
+cm wiki apply --page overview --input overview.md
+cm wiki status
 cm pack --file cm [--task <task>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
 cm absorb --file cm --input result.jsonl
 cm claim --file cm --task <task>|current --owner <id> [--lease 30]
@@ -139,7 +168,9 @@ model proposes; `cm` still verifies and stores.
 `explore` is the guided repository-onboarding loop. The simple form is
 `cm explore --file cm --root .`; it creates or reuses a task frame, scans the
 repository surface, indexes existing memories, and chooses macro/micro and the
-record budget dynamically. Macro is for first exploration or architecture
+record budget dynamically. In a git repository the snapshot comes from
+`git ls-files`, so `.gitignore` and nested package areas are handled; elsewhere
+it walks the tree breadth-first with explicit build/cache directory skips. Macro is for first exploration or architecture
 refresh: manifests, entry points, module boundaries, build/test paths, and
 invariants. Micro starts from changed files, frame touches, and existing memory
 sources, then records deltas and supersedes stale memories. The prompt carries
@@ -150,6 +181,108 @@ command writes the result. Advanced users can override `--mode`, `--query`,
 `--dry-run`, `--replace`, and `--allow-long-text`. `explore` is a guide, not an
 autonomous crawler: it reports paths and candidate targets, while the model
 reads the chosen files and `absorb` still validates every source and evidence ID.
+
+For code structure, prefer the mechanical path:
+
+```bash
+cm explore --file cm --root . --mechanical --apply
+```
+
+It uses only the repository scan and manifest scripts. It records repo layout,
+build/test commands, entry points, and source-area counts without sending any
+code to a model. CodeGraph-style symbol/call-graph indexes remain the right tool
+for structural queries; `cm` stores only the durable facts and decisions that
+should survive the index.
+
+`cm wiki` is the human-facing counterpart, closer to Qoder-style repository
+documentation than to a memory outline:
+
+```bash
+cm wiki plan --root . --out .cm/wiki [--max-modules 24]  # page plan + manifest
+cm wiki next --root . --out .cm/wiki     # next page id + prompt for the agent
+cm wiki prompt --page overview           # prompt for one specific page
+cm wiki apply --page overview --input overview.md
+cm wiki review --page overview --review-cmd "your-reviewer"
+cm wiki status                           # written / planned / stale pages
+cm wiki check [--strict]                 # shape, line citations, wiki links
+cm wiki find --query "runtime flows"     # rank pages for a task before reading
+cm wiki route --query "runtime flows"    # auto-pick none / excerpt / full page
+cm wiki excerpt --page overview --query "build test"  # only matching H2 sections
+cm wiki generate --agent-cmd "your-agent" \
+  [--review-cmd "your-reviewer"] [--review-rounds 2] [--max-pages N] [--page <id>]
+```
+
+`plan` creates overview, architecture, build/test, testing, key-flow, and
+module pages from one repository scan (up to 24 module pages by default;
+`--max-modules` trades breadth for generation cost). `find` ranks pages by
+title, summary, and H2 section text so a cross-cutting question can route to
+`key-flows` instead of the nearest module page. `route` combines both and returns
+`mode: none|excerpt|full` with the chosen page/section and reasons; pass
+`--task-size small` to prefer no wiki for narrow tasks. `excerpt` returns the page
+title and introduction plus only the H2 sections whose text matches the query,
+within `--budget`; use it instead of injecting a full page. Module pages target a
+bounded set of concrete key files plus their area; when a module lives inside a
+package, the plan also includes the package-root source barrel and `package.json`
+so the public export map is part of the read set. Architecture pages use a
+bounded set of root manifests, package index files, and entry points rather
+than directory targets, which keeps prompts fast on large monorepos. Key-flow
+pages prefer real `main`/`cli`/agent-loop/compaction files and exclude example
+directories. Their titles combine the package name with the area
+inside it (`Module: pi-ai / providers`) so a monorepo does not produce duplicate
+page names. Each `prompt` includes a mechanically extracted symbol map, asks
+for 800-1500 words of prose (1200-2000 for large module pages), concrete
+file/symbol references, Mermaid diagrams on architecture and flow pages, and
+explicit unknowns instead of guesses; it also tells the agent to stay read-only
+and not run builds or tests. `apply` requires exactly one level-1 heading that
+matches the planned title, at least 3 sections and 1200 characters, writes the
+page atomically, and records source hashes plus the git commit. `status` diffs
+each commit once for all pages, catches staged, unstaged, and untracked changes,
+and falls back to content hashes outside git. `check` verifies page shape,
+`path:line` citations (including rejecting line ranges and bare `:NN`
+shorthand), cross-page links, module target coverage, and the per-page word
+budget; `--strict` raises the gate to 4 sections and 2400 characters, requires
+Mermaid on architecture/flow pages, requires the module Dependencies/Failure
+modes sections, and fails while any page is still planned or stale. `generate --agent-cmd` runs the
+prompt/apply loop for every pending page with any local agent command (prompt on
+stdin, Markdown on stdout, command cwd set to the repo root); leading agent
+preamble and an outer Markdown fence are removed before validation. Before
+applying, `generate` re-hashes the page targets and the output directory; an
+agent that edits files instead of returning Markdown is rejected. After apply,
+`generate` runs page-level mechanical checks for target coverage and citation
+resolution; a page that omits a target or cites a missing line is marked stale
+and reported as failed. `--page <id>` generates one named page regardless of its
+position in the plan. Generated pages live outside `cm` and are not recall
+records. `cm wiki remember --file cm` can write one compact pointer record per
+review-passed page (kind `procedure`, subject `wiki: <title>`, source pointing
+at the page file); normal `cm recall`/`cm brief` then returns the page summary
+and location without copying the full page into the hot memory file. `--page`
+limits it to one page, `--no-replace` keeps existing records, and
+`--include-unreviewed` bypasses the review gate.
+
+Test and production runs can use different commands and output directories.
+Use a temporary `--out` plus a cheap `--agent-cmd` for staging, and a separate
+production agent/output pair for the real wiki; promote a page only after
+`cm wiki check --strict` passes on the complete wiki. Never hand-edit a page
+under the wiki output directory: regenerate it through `wiki generate` or feed
+review findings back into the generator, so the review gate sees the actual
+model output.
+
+`generate --review-cmd` separates generation from acceptance: the generator
+returns Markdown, then an independent reviewer command receives the page plus
+its generation prompt on stdin and returns
+`{"verdict":"pass|fail","score":0-100,"issues":["..."]}`. Failed pages are
+revised with the reviewer's or mechanical findings for up to
+`--review-rounds` attempts; a page is counted as written only after both the
+mechanical gate and the reviewer pass. `cm wiki review
+--page <id>` runs the same reviewer as a standalone gate. Review results are
+persisted in the manifest (`review.verdict`, `score`, `issues`, `reviewed_at`);
+`wiki status` reports `review_passed` and `review_failed`, and any new page
+revision clears the old verdict. The reviewer treats these as blocking, not
+notes: bare `:NN` shorthand, guard/catch citations for a throw/return claim, a
+shared citation for several named exports, Mermaid edges that are not real
+call/import relationships, unsupported absolute quantifiers, and a missing
+TARGET file or primary export. That makes the generation loop rewrite the page
+instead of accepting a merely "passing" page with known citation debt.
 
 `claim --owner <id>` takes a lease on a task frame; a second agent is rejected
 while the lease is live. `release` clears it, and `finish` clears it together
@@ -393,6 +526,23 @@ Working-set checks:
 - Multi-session A/B on a small config task: -7.0% tokens and -4.5% wall time,
   but +28.6% tool uses. Multi-session value needs larger repositories and more
   than two sessions; short tasks remain a loss.
+
+## Full automatic wiki loop
+
+`eval/wiki_auto.mjs` runs `plan -> generate batches -> check --strict -> remember`
+and stops with a non-zero exit code if the wiki is not clean.
+
+```bash
+node eval/wiki_auto.mjs --cm target/release/cm.exe \
+  --root C:/wp/empty/pi --out C:/wp/empty/wiki-v10 \
+  --agent-cmd "<agent command>" --review-cmd "<review command>" \
+  --rounds 2 --batch 5 --max-batches 20 \
+  --memory C:/wp/empty/cm --remember
+```
+
+`AGENTS.md` is the short agent-facing guide: `brief` once, `wiki route` first,
+one full page/excerpt at most, never hand-edit generated pages, and only
+`wiki remember` after `check --strict` is clean.
 
 ## Development
 

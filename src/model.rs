@@ -1,10 +1,231 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "cli")]
+use std::collections::HashSet;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use xxhash_rust::xxh3::{xxh3_128, xxh3_64_with_seed};
+use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh3::xxh3_128;
+#[cfg(feature = "cli")]
+use xxhash_rust::xxh3::xxh3_64_with_seed;
+
+use crate::source::{source_anchor, source_anchor_at};
+
+#[derive(Deserialize)]
+pub(crate) struct AppendInput {
+    pub(crate) kind: String,
+    pub(crate) scope: String,
+    pub(crate) subject: String,
+    pub(crate) text: String,
+    #[serde(default)]
+    pub(crate) source: String,
+    #[serde(default = "default_confidence")]
+    pub(crate) confidence: f64,
+    #[serde(default)]
+    pub(crate) valid_from: u64,
+    #[serde(default)]
+    pub(crate) valid_to: Option<u64>,
+    #[serde(default)]
+    pub(crate) supersedes: Vec<String>,
+    #[serde(default)]
+    pub(crate) conflict_of: Option<String>,
+    #[serde(default)]
+    pub(crate) trust: Option<String>,
+    #[serde(default)]
+    pub(crate) source_commit: Option<String>,
+}
+
+pub(crate) fn default_confidence() -> f64 {
+    0.8
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ImportLine {
+    Full(MemoryOut),
+    Append(AppendInput),
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MemoryOut {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) scope: String,
+    pub(crate) subject: String,
+    pub(crate) text: String,
+    pub(crate) source: String,
+    pub(crate) confidence: f64,
+    #[serde(default)]
+    pub(crate) sources: Vec<String>,
+    #[serde(default)]
+    pub(crate) merged: bool,
+    #[serde(default)]
+    pub(crate) created_at: u64,
+    #[serde(default)]
+    pub(crate) strategy: Option<String>,
+    #[serde(default)]
+    pub(crate) score: Option<f64>,
+    #[serde(default)]
+    pub(crate) valid_from: u64,
+    #[serde(default)]
+    pub(crate) valid_to: Option<u64>,
+    #[serde(default)]
+    pub(crate) supersedes: Vec<String>,
+    #[serde(default)]
+    pub(crate) conflict_of: Option<String>,
+    #[serde(default)]
+    pub(crate) trust: Option<String>,
+    #[serde(default)]
+    pub(crate) source_commit: Option<String>,
+    #[serde(default)]
+    pub(crate) source_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) source_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) snippet: Option<String>,
+}
+
+impl MemoryOut {
+    pub(crate) fn into_memory(self) -> crate::model::Memory {
+        crate::model::Memory {
+            id: self.id,
+            kind: self.kind,
+            scope: self.scope,
+            subject: self.subject,
+            text: self.text,
+            source: self.source,
+            confidence: self.confidence.clamp(0.0, 1.0),
+            sources: self.sources,
+            created_at: self.created_at,
+            strategy: self.strategy,
+            score: self.score,
+            merged: self.merged,
+            valid_from: if self.valid_from == 0 {
+                self.created_at
+            } else {
+                self.valid_from
+            },
+            valid_to: self.valid_to,
+            supersedes: self.supersedes,
+            conflict_of: self.conflict_of,
+            trust: self.trust.unwrap_or_else(|| "authored".to_string()),
+            source_commit: self.source_commit,
+            source_hash: self.source_hash,
+            source_line: self.source_line,
+        }
+    }
+}
+
+impl From<&crate::model::Memory> for MemoryOut {
+    fn from(memory: &crate::model::Memory) -> Self {
+        Self {
+            id: memory.id.clone(),
+            kind: memory.kind.clone(),
+            scope: memory.scope.clone(),
+            subject: memory.subject.clone(),
+            text: memory.text.clone(),
+            source: memory.source.clone(),
+            confidence: memory.confidence,
+            sources: memory.sources.clone(),
+            merged: memory.merged,
+            created_at: memory.created_at,
+            strategy: memory.strategy.clone(),
+            score: memory.score,
+            valid_from: memory.valid_from,
+            valid_to: memory.valid_to,
+            supersedes: memory.supersedes.clone(),
+            conflict_of: memory.conflict_of.clone(),
+            trust: Some(memory.trust.clone()),
+            source_commit: memory.source_commit.clone(),
+            source_hash: memory.source_hash.clone(),
+            source_line: memory.source_line,
+            snippet: None,
+        }
+    }
+}
+
+pub(crate) fn validate_trust(trust: &str) -> Result<()> {
+    if matches!(trust, "authored" | "verified" | "imported" | "inferred") {
+        Ok(())
+    } else {
+        bail!("invalid trust {trust:?}; expected authored/verified/imported/inferred")
+    }
+}
+
+pub(crate) fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
+    memory_from_input_at(input, None)
+}
+
+pub(crate) fn memory_from_input_at(
+    input: &AppendInput,
+    root: Option<&std::path::Path>,
+) -> Result<crate::model::Memory> {
+    validate_input(input)?;
+    let trust = input.trust.as_deref().unwrap_or("authored");
+    validate_trust(trust)?;
+    let mut memory = new_memory(
+        &input.kind,
+        &input.scope,
+        &input.subject,
+        &input.text,
+        &input.source,
+        input.confidence.clamp(0.0, 1.0),
+        Vec::new(),
+        None,
+        None,
+    );
+    memory.valid_from = if input.valid_from == 0 {
+        crate::model::now_ms()
+    } else {
+        input.valid_from
+    };
+    memory.valid_to = input.valid_to;
+    memory.supersedes = input.supersedes.clone();
+    memory.conflict_of = input.conflict_of.clone();
+    memory.trust = trust.to_string();
+    memory.source_commit = input.source_commit.clone();
+    let anchor = match root {
+        Some(root) => source_anchor_at(&input.source, root),
+        None => source_anchor(&input.source),
+    };
+    if let Some((line, hash)) = anchor {
+        memory.source_hash = Some(hash);
+        memory.source_line = (line > 0).then_some(line);
+    }
+    Ok(memory)
+}
+
+pub(crate) fn validate_memory(kind: &str, scope: &str, subject: &str, text: &str) -> Result<()> {
+    if subject.trim().is_empty() || text.trim().is_empty() {
+        bail!("subject and text must not be empty");
+    }
+    if scope.trim().is_empty() {
+        bail!("scope must not be empty");
+    }
+    if !KINDS.contains(&kind) {
+        bail!("invalid kind {:?}", kind);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_input(input: &AppendInput) -> Result<()> {
+    validate_memory(&input.kind, &input.scope, &input.subject, &input.text)
+}
+
+pub(crate) fn put_text(out: &mut Vec<u8>, id: u8, value: &str) {
+    out.push(id);
+    out.push(1);
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+pub(crate) fn put_u64(out: &mut Vec<u8>, id: u8, value: u64) {
+    out.push(id);
+    out.push(2);
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&value.to_le_bytes());
+}
 
 pub(crate) const KINDS: &[&str] = &[
     "fact",
@@ -483,6 +704,7 @@ fn clean_field(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn parse_ids(raw: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     raw.split(',')
@@ -718,8 +940,10 @@ fn split_camel_case(text: &str) -> String {
     out
 }
 
+#[cfg(feature = "cli")]
 pub(crate) const MINHASH_K: usize = 128;
 
+#[cfg(feature = "cli")]
 pub(crate) fn minhash_signature(memory: &Memory) -> Option<Vec<u64>> {
     let tokens: HashSet<String> = tokenize(&format!("{} {}", memory.subject, memory.text))
         .into_iter()
@@ -739,6 +963,7 @@ pub(crate) fn minhash_signature(memory: &Memory) -> Option<Vec<u64>> {
     Some(signature)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn minhash_similarity(left: &Option<Vec<u64>>, right: &Option<Vec<u64>>) -> f64 {
     let (Some(left), Some(right)) = (left, right) else {
         return 0.0;
@@ -749,6 +974,7 @@ pub(crate) fn minhash_similarity(left: &Option<Vec<u64>>, right: &Option<Vec<u64
     left.iter().zip(right).filter(|(a, b)| a == b).count() as f64 / left.len() as f64
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn pair_similarity(
     left: &Memory,
     right: &Memory,
@@ -770,11 +996,13 @@ pub(crate) fn pair_similarity(
     }
 }
 
+#[cfg(feature = "cli")]
 pub(crate) struct Dsu {
     parent: Vec<usize>,
     rank: Vec<usize>,
 }
 
+#[cfg(feature = "cli")]
 impl Dsu {
     pub(crate) fn new(size: usize) -> Self {
         Self {

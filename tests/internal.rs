@@ -6,23 +6,41 @@
 //! dead code is still rejected by `cargo clippy` on the real lib/bin targets.
 #![allow(dead_code)]
 
+#[path = "../src/api.rs"]
+mod api;
+#[path = "../src/brief.rs"]
+mod brief;
 #[path = "../src/cache.rs"]
 mod cache;
 #[path = "../src/cli.rs"]
 mod cli;
 #[path = "../src/explore.rs"]
 mod explore;
+#[path = "../src/explore_api.rs"]
+mod explore_api;
+#[path = "../src/frames.rs"]
+mod frames;
 #[path = "../src/install.rs"]
 mod install;
 #[path = "../src/model.rs"]
 mod model;
+#[path = "../src/mutate.rs"]
+mod mutate;
+#[path = "../src/search.rs"]
+mod search;
+#[path = "../src/source.rs"]
+mod source;
 #[path = "../src/store.rs"]
 mod store;
+#[path = "../src/wiki.rs"]
+mod wiki;
 
 use cache::*;
 use cli::*;
+use explore_api::*;
 use install::*;
 use model::*;
+use search::*;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
@@ -1162,8 +1180,20 @@ mod cli_tests {
                 .map(|memory| memory.id)
                 .collect::<Vec<_>>()
         };
-        let before = search_out(&path, "alpha", 1, None, None, None, 0.0, None, false)
-            .expect("search before forget");
+        let before = search_out(
+            &path,
+            &SearchQuery {
+                query: "alpha".to_string(),
+                top: 1,
+                scope: None,
+                task: None,
+                kind: None,
+                min_trust: None,
+                min_score: 0.0,
+                include_expired: false,
+            },
+        )
+        .expect("search before forget");
         assert_eq!(before.candidates.len(), 1);
         let hidden_id = before.candidates[0].id.clone();
         let visible_id = ids
@@ -1172,8 +1202,20 @@ mod cli_tests {
             .expect("visible record");
 
         cmd_forget(&path, &hidden_id).expect("forget top hit");
-        let after = search_out(&path, "alpha", 1, None, None, None, 0.0, None, false)
-            .expect("search after forget");
+        let after = search_out(
+            &path,
+            &SearchQuery {
+                query: "alpha".to_string(),
+                top: 1,
+                scope: None,
+                task: None,
+                kind: None,
+                min_trust: None,
+                min_score: 0.0,
+                include_expired: false,
+            },
+        )
+        .expect("search after forget");
         assert_eq!(
             after.candidates.len(),
             1,
@@ -1317,4 +1359,47 @@ mod cli_tests {
             Some("conflict: 3 more not shown")
         );
     }
+}
+
+#[test]
+fn scan_repo_keeps_shallow_areas_after_deep_branches() {
+    let dir = std::env::temp_dir().join(format!("cm-scan-{}", crate::model::new_id()));
+    std::fs::create_dir_all(dir.join("a/b/c/d/e/f/g/h/i/j/k")).expect("deep tree");
+    std::fs::write(dir.join("a/b/c/d/e/f/g/h/i/j/k/deep.rs"), "fn deep() {}\n").expect("deep file");
+    std::fs::create_dir_all(dir.join("zsrc/mes")).expect("source tree");
+    for index in 0..20 {
+        std::fs::write(
+            dir.join(format!("zsrc/mes/Class{index}.java")),
+            "class X {}\n",
+        )
+        .expect("source file");
+    }
+    std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("manifest");
+
+    let scan = explore::scan_repo(&dir);
+    assert_eq!(scan.files, 22);
+    assert_eq!(scan.source_files, 21);
+    assert!(scan.top_dirs.iter().any(|dir| dir.path == "zsrc"));
+    assert!(scan.top_dirs.iter().any(|dir| dir.path == "a"));
+    assert!(scan.areas.iter().any(|area| area.path == "zsrc/mes"));
+    assert!(scan.manifests.iter().any(|path| path == "Cargo.toml"));
+    assert!(!explore::is_explore_input(".cm/wiki/overview.md"));
+    assert_eq!(scan.file_paths.len(), scan.files);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn porcelain_z_rename_keeps_both_paths() {
+    let paths = wiki::parse_porcelain_z(b"R  new.txt\0old.txt\0 M src/lib.rs\0?? notes.md\0");
+    assert_eq!(paths, vec!["new.txt", "old.txt", "src/lib.rs", "notes.md"]);
+}
+
+#[test]
+fn wiki_agent_output_keeps_a_legitimate_trailing_code_fence() {
+    let page = "# Title\n\n## Example\n\n```text\nhello\n```\n";
+    assert!(wiki::clean_agent_output(page).ends_with("```"));
+    let wrapped = "preamble\n\n```markdown\n# Title\n\n## Example\n\nProse only.\n```\n";
+    let cleaned = wiki::clean_agent_output(wrapped);
+    assert!(cleaned.starts_with("# Title"));
+    assert!(!cleaned.ends_with("```"));
 }

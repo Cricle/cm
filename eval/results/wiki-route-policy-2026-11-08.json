@@ -1,0 +1,126 @@
+{
+  "date": "2026-11-08",
+  "command": "cm wiki route --query <text> --budget 800 --max-sections 2 --task-size auto|small",
+  "policy": {
+    "none": "no page match, top score < 20, or task_size=small",
+    "excerpt": "a selected non-generic H2 heading matches a query term",
+    "full": "page is relevant but only generic sections match"
+  },
+  "decisions": [
+    {
+      "query": "compaction retry queued messages failure recovery",
+      "mode": "excerpt",
+      "page": "key-flows",
+      "estimated_tokens": 600,
+      "best_measured": "excerpt"
+    },
+    {
+      "query": "ModelRuntime auth provider composition",
+      "mode": "excerpt",
+      "page": "module-packages-ai-src-providers",
+      "estimated_tokens": 757,
+      "best_measured": "excerpt"
+    },
+    {
+      "query": "storage backends commit atomicity JSONL recovery compaction",
+      "mode": "full",
+      "page": "module-packages-durable-src-storage",
+      "estimated_tokens": 5176,
+      "best_measured": "full (excerpt close)"
+    },
+    {
+      "query": "interactive print json rpc mode selection errors",
+      "mode": "full",
+      "page": "module-packages-coding-agent-src-modes",
+      "estimated_tokens": 6490,
+      "best_measured": "full"
+    },
+    {
+      "query": "extension system loads extensions dispatches events",
+      "mode": "full",
+      "page": "module-packages-coding-agent-src-extensions",
+      "estimated_tokens": 4813,
+      "best_measured": "full"
+    },
+    {
+      "query": "credential resolution OAuth refresh auth failure codes",
+      "mode": "excerpt",
+      "page": "module-packages-ai-src-auth",
+      "estimated_tokens": 740,
+      "best_measured": "none (use --task-size small)"
+    },
+    {
+      "query": "rendering interaction flow editor input dirty refresh",
+      "mode": "excerpt",
+      "page": "module-packages-tui-src-components",
+      "estimated_tokens": 738,
+      "best_measured": "excerpt"
+    }
+  ],
+  "accuracy": "6/7 automatic; 7/7 with --task-size small for the narrow auth task.",
+  "end_to_end_runs": [
+    {
+      "task": "core compaction/retry/queues",
+      "route_mode": "excerpt",
+      "control": {
+        "tokens": 657422,
+        "tools": 28,
+        "ms": 198302
+      },
+      "route": {
+        "tokens": 746879,
+        "tools": 23,
+        "ms": 143378
+      },
+      "delta_pct": {
+        "tokens": 13.6,
+        "tools": -17.9,
+        "wall": -27.7
+      }
+    },
+    {
+      "task": "durable storage",
+      "route_mode": "full",
+      "control": {
+        "tokens": 1016161,
+        "tools": 35,
+        "ms": 317693
+      },
+      "route": {
+        "tokens": 397018,
+        "tools": 10,
+        "ms": 113446
+      },
+      "delta_pct": {
+        "tokens": -60.9,
+        "tools": -71.4,
+        "wall": -64.3
+      }
+    },
+    {
+      "task": "pi-ai auth (small)",
+      "route_mode": "none",
+      "control": {
+        "tokens": 220655,
+        "tools": 17,
+        "ms": 99947
+      },
+      "route": {
+        "tokens": 180021,
+        "tools": 13,
+        "ms": 68131
+      },
+      "delta_pct": {
+        "tokens": -18.4,
+        "tools": -23.5,
+        "wall": -31.8
+      }
+    }
+  ],
+  "end_to_end_summary": {
+    "tokens_pct": -21.9,
+    "tools_pct": -37.6,
+    "wall_pct": -41.3,
+    "note": "Route wins overall; core has token overhead because the route command adds a turn, but tools and wall time improve. auth small was correctly routed to none."
+  }
+}

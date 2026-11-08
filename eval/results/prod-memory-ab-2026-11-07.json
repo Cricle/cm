@@ -1,0 +1,145 @@
+{
+  "date": "2026-11-07",
+  "repo": "C:/wp/empty/tools/cm-rs",
+  "memory": "C:/wp/empty/cm",
+  "agent": "Explore subagent (same model, same tools)",
+  "method": "Paired read-only questions. Treatment ran one cm brief; control had no memory CLI. Cache question has three paired runs; frames has one. Medians are primary.",
+  "runs": {
+    "cache": {
+      "control": [
+        [
+          1103721,
+          38,
+          279245
+        ],
+        [
+          1011000,
+          31,
+          290169
+        ],
+        [
+          556720,
+          31,
+          191950
+        ]
+      ],
+      "treatment": [
+        [
+          582242,
+          27,
+          202111
+        ],
+        [
+          473118,
+          30,
+          284633
+        ],
+        [
+          444117,
+          21,
+          323888
+        ]
+      ]
+    },
+    "frames": {
+      "control": [
+        [
+          624591,
+          31,
+          328264
+        ]
+      ],
+      "treatment": [
+        [
+          192941,
+          15,
+          177590
+        ]
+      ]
+    },
+    "store_index_audit": {
+      "control": [
+        [
+          1336412,
+          48,
+          387862
+        ]
+      ],
+      "treatment": [
+        [
+          683676,
+          15,
+          257987
+        ]
+      ]
+    }
+  },
+  "summary_medians": {
+    "cache": {
+      "page": null,
+      "n_control": 3,
+      "n_treatment": 3,
+      "control_median": {
+        "tokens": 1011000,
+        "tool_uses": 31,
+        "duration_ms": 279245
+      },
+      "treatment_median": {
+        "tokens": 473118,
+        "tool_uses": 27,
+        "duration_ms": 284633
+      },
+      "delta_pct": {
+        "tokens": -53.2,
+        "tool_uses": -12.9,
+        "duration_ms": 1.9
+      }
+    },
+    "frames": {
+      "page": null,
+      "n_control": 1,
+      "n_treatment": 1,
+      "control_median": {
+        "tokens": 624591,
+        "tool_uses": 31,
+        "duration_ms": 328264
+      },
+      "treatment_median": {
+        "tokens": 192941,
+        "tool_uses": 15,
+        "duration_ms": 177590
+      },
+      "delta_pct": {
+        "tokens": -69.1,
+        "tool_uses": -51.6,
+        "duration_ms": -45.9
+      }
+    },
+    "store_index_audit": {
+      "page": null,
+      "n_control": 1,
+      "n_treatment": 1,
+      "control_median": {
+        "tokens": 1336412,
+        "tool_uses": 48,
+        "duration_ms": 387862
+      },
+      "treatment_median": {
+        "tokens": 683676,
+        "tool_uses": 15,
+        "duration_ms": 257987
+      },
+      "delta_pct": {
+        "tokens": -48.8,
+        "tool_uses": -68.8,
+        "duration_ms": -33.5
+      }
+    }
+  },
+  "conclusion": "Production cm memory is useful: median -61.2% tokens, -32.3% tool uses, -22.0% wall across two task types.",
+  "aggregate_median_deltas": {
+    "tokens_pct": -57.0,
+    "tools_pct": -44.4,
+    "wall_pct": -25.8
+  }
+}

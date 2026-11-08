@@ -1,0 +1,304 @@
+{
+  "date": "2026-11-07",
+  "repo": "C:/wp/empty/pi",
+  "wiki": "C:/wp/empty/wiki-v10",
+  "agent": "Explore subagent (same model, same tools)",
+  "method": "Paired read-only tasks. Treatment got exactly one relevant wiki page; control got none. Same task text and citation requirement. All answers spot-checked against source. Core/providers/storage have three paired runs; modes has one. Medians are primary because one core treatment run was a long outlier.",
+  "runs": {
+    "core": {
+      "page": "module-packages-coding-agent-src-core.md",
+      "control": [
+        [
+          657422,
+          28,
+          198302
+        ],
+        [
+          725268,
+          37,
+          227609
+        ],
+        [
+          510309,
+          25,
+          118268
+        ],
+        [
+          952717,
+          27,
+          275804
+        ],
+        [
+          649423,
+          41,
+          155091
+        ]
+      ],
+      "treatment": [
+        [
+          555323,
+          22,
+          201422
+        ],
+        [
+          245849,
+          17,
+          98105
+        ],
+        [
+          1420656,
+          58,
+          402902
+        ],
+        [
+          796157,
+          32,
+          156835
+        ],
+        [
+          427299,
+          28,
+          93404
+        ]
+      ]
+    },
+    "providers": {
+      "page": "module-packages-ai-src-providers.md",
+      "control": [
+        [
+          689602,
+          27,
+          157198
+        ],
+        [
+          1255164,
+          31,
+          267548
+        ],
+        [
+          871434,
+          32,
+          285792
+        ]
+      ],
+      "treatment": [
+        [
+          248808,
+          11,
+          71172
+        ],
+        [
+          862561,
+          19,
+          240627
+        ],
+        [
+          521505,
+          17,
+          240094
+        ]
+      ]
+    },
+    "storage": {
+      "page": "module-packages-durable-src-storage.md",
+      "control": [
+        [
+          1016161,
+          48,
+          234690
+        ],
+        [
+          684514,
+          35,
+          317693
+        ],
+        [
+          1178247,
+          29,
+          395672
+        ]
+      ],
+      "treatment": [
+        [
+          559462,
+          26,
+          216112
+        ],
+        [
+          330284,
+          15,
+          204387
+        ],
+        [
+          177458,
+          7,
+          86392
+        ]
+      ]
+    },
+    "modes": {
+      "page": "module-packages-coding-agent-src-modes.md",
+      "control": [
+        [
+          337907,
+          21,
+          168774
+        ]
+      ],
+      "treatment": [
+        [
+          183758,
+          14,
+          99060
+        ]
+      ]
+    },
+    "extensions": {
+      "page": "module-packages-coding-agent-src-extensions.md",
+      "control": [
+        [
+          694125,
+          19,
+          269664
+        ]
+      ],
+      "treatment": [
+        [
+          326069,
+          18,
+          111064
+        ]
+      ]
+    }
+  },
+  "summary_medians": {
+    "core": {
+      "page": "module-packages-coding-agent-src-core.md",
+      "n_control": 5,
+      "n_treatment": 5,
+      "control_median": {
+        "tokens": 657422,
+        "tool_uses": 28,
+        "duration_ms": 198302
+      },
+      "treatment_median": {
+        "tokens": 555323,
+        "tool_uses": 28,
+        "duration_ms": 156835
+      },
+      "delta_pct": {
+        "tokens": -15.5,
+        "tool_uses": 0.0,
+        "duration_ms": -20.9
+      }
+    },
+    "providers": {
+      "page": "module-packages-ai-src-providers.md",
+      "n_control": 3,
+      "n_treatment": 3,
+      "control_median": {
+        "tokens": 871434,
+        "tool_uses": 31,
+        "duration_ms": 267548
+      },
+      "treatment_median": {
+        "tokens": 521505,
+        "tool_uses": 17,
+        "duration_ms": 240094
+      },
+      "delta_pct": {
+        "tokens": -40.2,
+        "tool_uses": -45.2,
+        "duration_ms": -10.3
+      }
+    },
+    "storage": {
+      "page": "module-packages-durable-src-storage.md",
+      "n_control": 3,
+      "n_treatment": 3,
+      "control_median": {
+        "tokens": 1016161,
+        "tool_uses": 35,
+        "duration_ms": 317693
+      },
+      "treatment_median": {
+        "tokens": 330284,
+        "tool_uses": 15,
+        "duration_ms": 204387
+      },
+      "delta_pct": {
+        "tokens": -67.5,
+        "tool_uses": -57.1,
+        "duration_ms": -35.7
+      }
+    },
+    "modes": {
+      "page": "module-packages-coding-agent-src-modes.md",
+      "n_control": 1,
+      "n_treatment": 1,
+      "control_median": {
+        "tokens": 337907,
+        "tool_uses": 21,
+        "duration_ms": 168774
+      },
+      "treatment_median": {
+        "tokens": 183758,
+        "tool_uses": 14,
+        "duration_ms": 99060
+      },
+      "delta_pct": {
+        "tokens": -45.6,
+        "tool_uses": -33.3,
+        "duration_ms": -41.3
+      }
+    },
+    "extensions": {
+      "page": "module-packages-coding-agent-src-extensions.md",
+      "n_control": 1,
+      "n_treatment": 1,
+      "control_median": {
+        "tokens": 694125,
+        "tool_uses": 19,
+        "duration_ms": 269664
+      },
+      "treatment_median": {
+        "tokens": 326069,
+        "tool_uses": 18,
+        "duration_ms": 111064
+      },
+      "delta_pct": {
+        "tokens": -53.0,
+        "tool_uses": -5.3,
+        "duration_ms": -58.8
+      }
+    }
+  },
+  "multi_page_failure": {
+    "task": "providers",
+    "pages": [
+      "module-packages-ai-src-providers.md",
+      "module-packages-ai-src-auth.md"
+    ],
+    "control": {
+      "tokens": 689602,
+      "tool_uses": 27,
+      "duration_ms": 157198
+    },
+    "treatment": {
+      "tokens": 1831138,
+      "tool_uses": 43,
+      "duration_ms": 299782
+    },
+    "delta_pct": {
+      "tokens": 165.5,
+      "tool_uses": 59.3,
+      "duration_ms": 90.7
+    }
+  },
+  "conclusion": "One focused wiki page is useful by median: -44.4% tokens, -28.2% tool uses, -33.4% wall across five task types. Core is the noisiest task (N=5, one 1.42M-token outlier; median still -15.5% tokens). Two large pages for one broad task is a failure mode (+165.5% tokens). Use one page or a compact pointer.",
+  "aggregate_median_deltas": {
+    "tokens_pct": -44.4,
+    "tools_pct": -28.2,
+    "wall_pct": -33.4
+  }
+}

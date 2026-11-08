@@ -15,7 +15,11 @@ index for source-grounded project knowledge, not a universal knowledge base.
 
 - Company-wide or multi-tenant memory.
 - General document search, PDF/issue/chat ingestion, or web knowledge.
-- A full wiki that humans read.
+- A wiki stored inside the hot memory file. `cm wiki` generates human-facing
+  pages under `.cm/wiki`; those pages are a separate artifact and are not recall
+  records. `cm wiki remember` may write compact pointer records (summary, page
+  path, targets) so recall can route an agent to a reviewed page without
+  copying the page prose into `cm`.
 - Exhaustive symbol-by-symbol documentation.
 - A replacement for source code, tests, or official docs. Source remains the
   source of truth.
@@ -33,7 +37,14 @@ next steps, open questions, and touched paths for the current work item. It is
 stored as a normal memory record (`kind=frame`), superseded on update, and kept
 separate from project facts. `cm brief` composes the active frame with a
 budgeted task working set so a new session or another agent can resume without
-re-reading the repository. `cm explore` is the guided onboarding counterpart:
+re-reading the repository. `cm wiki` builds a human-facing repository wiki under
+`.cm/wiki`: deterministic page planning and per-page prompts, with Markdown
+pages applied back through a title/shape/citation and source-freshness gate.
+Git-aware staleness is cached per commit, and `--strict` rejects incomplete,
+stale, or diagram-less architecture pages. `--review-cmd` adds an independent
+LLM reviewer loop: a page is counted only after the reviewer returns a pass,
+with failed pages revised from the reviewer's findings. The generated pages are
+not cm memory. `cm explore` is the guided memory-onboarding counterpart:
 macro exploration maps manifests, entry points, and module boundaries; micro
 exploration starts from changed files, frame touches, and existing sources. It
 returns a deterministic prompt with targets, known-memory IDs, an evidence ID,

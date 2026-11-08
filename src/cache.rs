@@ -492,7 +492,11 @@ fn lookup_locked(
 }
 
 pub(crate) fn cache_path(store_path: &Path) -> PathBuf {
-    store_path.with_file_name("cm.cache")
+    let name = store_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cm".to_string());
+    store_path.with_file_name(format!("{name}.cache"))
 }
 
 fn temp_cache_path(path: &Path) -> PathBuf {

@@ -9,193 +9,40 @@ use std::process;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use xxhash_rust::xxh3::xxh3_64;
 
-use crate::explore::{scan_repo, RepoScan};
-use crate::model::{
-    build_merged, cmx_line, content_hash, estimate_tokens, kind_id, memory_payload, memory_snippet,
-    minhash_signature, minhash_similarity, new_memory, pair_similarity, parse_ids, preview, Dsu,
-    KINDS,
+use crate::brief::{
+    brief_prompt, collect_feedback_stats, json_tokens, BriefMemory, Feedback, FeedbackStats,
+    FEEDBACK_KIND,
 };
+use crate::explore::scan_repo;
+use crate::explore_api::{
+    build_explore_prompt, changed_paths, collect_explore_known, collect_explore_targets,
+    display_explore_root, ensure_explore_frame, explore_mode, mechanical_explore,
+    ExplorePromptInput,
+};
+use crate::frames::{
+    append_values, collect_frames, ensure_frame_owner, frame_json, frame_query,
+    frame_query_for_task, frame_subject, latest_frame, parse_frame, save_frame, uncovered_touches,
+    TaskFrame, FRAME_KIND,
+};
+use crate::model::{
+    build_merged, cmx_line, content_hash, estimate_tokens, kind_id, memory_from_input,
+    memory_payload, minhash_signature, minhash_similarity, pair_similarity, parse_ids, preview,
+    validate_input, validate_memory, validate_trust, AppendInput, Dsu, ImportLine, MemoryOut,
+};
+use crate::mutate::write_feedback;
+use crate::search::{active_memories, search_out, select_context, RecallQuery, SearchQuery};
+use crate::source::{anchor_text, source_anchor, source_parts, source_snippet};
 use crate::store::{
-    append_record, encode_header, find_tail_duplicate, read_header_file, reindex_file, Header,
-    Store, HEADER_LEN,
+    append_record, create_store, find_tail_duplicate, read_header_file, reindex_file, Store,
 };
 
 const SKILL_TEXT: &str = include_str!("../assets/SKILL.md");
-const FRAME_SCOPE: &str = "__cm_frame__";
-const FRAME_KIND: &str = "frame";
-const FEEDBACK_SCOPE: &str = "__cm_feedback__";
-const FEEDBACK_KIND: &str = "feedback";
-
-#[derive(Clone, Serialize, Deserialize)]
-struct TaskFrame {
-    task: String,
-    goal: String,
-    status: String,
-    #[serde(default)]
-    constraints: Vec<String>,
-    #[serde(default)]
-    next: Vec<String>,
-    #[serde(default)]
-    open: Vec<String>,
-    #[serde(default)]
-    touches: Vec<String>,
-    #[serde(default)]
-    notes: Vec<String>,
-    #[serde(default)]
-    owner: Option<String>,
-    #[serde(default)]
-    lease_until: Option<u64>,
-    updated_at: u64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Feedback {
-    target: String,
-    signal: String,
-    #[serde(default)]
-    note: Option<String>,
-    updated_at: u64,
-}
 
 macro_rules! outln {
     ($($arg:tt)*) => {{
         let _ = writeln!(io::stdout(), $($arg)*);
     }};
-}
-
-#[derive(Deserialize)]
-pub(crate) struct AppendInput {
-    pub(crate) kind: String,
-    pub(crate) scope: String,
-    pub(crate) subject: String,
-    pub(crate) text: String,
-    #[serde(default)]
-    pub(crate) source: String,
-    #[serde(default = "default_confidence")]
-    pub(crate) confidence: f64,
-    #[serde(default)]
-    pub(crate) valid_from: u64,
-    #[serde(default)]
-    pub(crate) valid_to: Option<u64>,
-    #[serde(default)]
-    pub(crate) supersedes: Vec<String>,
-    #[serde(default)]
-    pub(crate) conflict_of: Option<String>,
-    #[serde(default)]
-    pub(crate) trust: Option<String>,
-    #[serde(default)]
-    pub(crate) source_commit: Option<String>,
-}
-
-fn default_confidence() -> f64 {
-    0.8
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ImportLine {
-    Full(MemoryOut),
-    Append(AppendInput),
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct MemoryOut {
-    id: String,
-    kind: String,
-    scope: String,
-    subject: String,
-    text: String,
-    source: String,
-    confidence: f64,
-    #[serde(default)]
-    sources: Vec<String>,
-    #[serde(default)]
-    merged: bool,
-    #[serde(default)]
-    created_at: u64,
-    #[serde(default)]
-    strategy: Option<String>,
-    #[serde(default)]
-    score: Option<f64>,
-    #[serde(default)]
-    valid_from: u64,
-    #[serde(default)]
-    valid_to: Option<u64>,
-    #[serde(default)]
-    supersedes: Vec<String>,
-    #[serde(default)]
-    conflict_of: Option<String>,
-    #[serde(default)]
-    trust: Option<String>,
-    #[serde(default)]
-    source_commit: Option<String>,
-    #[serde(default)]
-    source_hash: Option<String>,
-    #[serde(default)]
-    source_line: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    snippet: Option<String>,
-}
-
-impl MemoryOut {
-    fn into_memory(self) -> crate::model::Memory {
-        crate::model::Memory {
-            id: self.id,
-            kind: self.kind,
-            scope: self.scope,
-            subject: self.subject,
-            text: self.text,
-            source: self.source,
-            confidence: self.confidence.clamp(0.0, 1.0),
-            sources: self.sources,
-            created_at: self.created_at,
-            strategy: self.strategy,
-            score: self.score,
-            merged: self.merged,
-            valid_from: if self.valid_from == 0 {
-                self.created_at
-            } else {
-                self.valid_from
-            },
-            valid_to: self.valid_to,
-            supersedes: self.supersedes,
-            conflict_of: self.conflict_of,
-            trust: self.trust.unwrap_or_else(|| "authored".to_string()),
-            source_commit: self.source_commit,
-            source_hash: self.source_hash,
-            source_line: self.source_line,
-        }
-    }
-}
-
-impl From<&crate::model::Memory> for MemoryOut {
-    fn from(memory: &crate::model::Memory) -> Self {
-        Self {
-            id: memory.id.clone(),
-            kind: memory.kind.clone(),
-            scope: memory.scope.clone(),
-            subject: memory.subject.clone(),
-            text: memory.text.clone(),
-            source: memory.source.clone(),
-            confidence: memory.confidence,
-            sources: memory.sources.clone(),
-            merged: memory.merged,
-            created_at: memory.created_at,
-            strategy: memory.strategy.clone(),
-            score: memory.score,
-            valid_from: memory.valid_from,
-            valid_to: memory.valid_to,
-            supersedes: memory.supersedes.clone(),
-            conflict_of: memory.conflict_of.clone(),
-            trust: Some(memory.trust.clone()),
-            source_commit: memory.source_commit.clone(),
-            source_hash: memory.source_hash.clone(),
-            source_line: memory.source_line,
-            snippet: None,
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -205,22 +52,6 @@ struct CandidateOut {
     minhash: f64,
     subject: String,
     preview: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct SearchHit {
-    pub(crate) id: String,
-    bm25: f64,
-    kind: String,
-    scope: String,
-    subject: String,
-    preview: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct SearchOut {
-    query: String,
-    pub(crate) candidates: Vec<SearchHit>,
 }
 
 #[derive(Serialize)]
@@ -239,36 +70,6 @@ struct BriefOut {
     budget: usize,
     estimated_tokens: usize,
     memories: Vec<BriefMemory>,
-}
-
-#[derive(Serialize)]
-struct BriefMemory {
-    id: String,
-    kind: String,
-    subject: String,
-    text: String,
-    source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source_line: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source_commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    snippet: Option<String>,
-}
-
-impl From<&crate::model::Memory> for BriefMemory {
-    fn from(memory: &crate::model::Memory) -> Self {
-        Self {
-            id: memory.id.clone(),
-            kind: memory.kind.clone(),
-            subject: memory.subject.clone(),
-            text: memory.text.clone(),
-            source: memory.source.clone(),
-            source_line: memory.source_line,
-            source_commit: memory.source_commit.clone(),
-            snippet: None,
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -297,32 +98,7 @@ impl From<&crate::model::Memory> for PackMemory {
     }
 }
 
-#[derive(Deserialize)]
-struct AbsorbOp {
-    op: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    scope: Option<String>,
-    #[serde(default)]
-    subject: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    confidence: Option<f64>,
-    #[serde(default)]
-    evidence: Vec<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    supersedes: Vec<String>,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct AbsorbOut {
     ok: bool,
     accepted: usize,
@@ -460,6 +236,7 @@ pub fn run() -> Result<()> {
         "audit" => cmd_audit(&arg_path(&args), &args),
         "brief" => cmd_brief(&arg_path(&args), &args),
         "explore" => cmd_explore(&arg_path(&args), &args),
+        "wiki" => cmd_wiki(&args),
         "pack" => cmd_pack(&arg_path(&args), &args),
         "absorb" => cmd_absorb(&arg_path(&args), &args),
         "checkpoint" => cmd_checkpoint(&arg_path(&args), has_flag(&args, "--in-place")),
@@ -584,7 +361,17 @@ fn print_usage() {
          cm frame list
          cm brief [--task <id>|current] [--budget 1200] [--format json|prompt] [--snippets <n>] [--root <dir>]
          cm explore [--task <id>|current] [--query <text>] [--mode auto|macro|micro] [--budget 2000] [--max-items <n>] [--root <dir>] [--format prompt|json]
+         cm explore --mechanical [--apply] [--format json|jsonl]
          cm explore --apply result.jsonl [--dry-run] [--replace] [--allow-long-text]
+         cm wiki plan [--root <dir>] [--out .cm/wiki] [--max-modules <n>]
+         cm wiki prompt|apply|review|status|next [--root <dir>] [--out .cm/wiki] [--page <id>] [--input <file|->]
+         cm wiki review --page <id> --review-cmd <command> [--root <dir>] [--out .cm/wiki]
+         cm wiki check [--root <dir>] [--out .cm/wiki] [--strict]
+         cm wiki find --query <text> [--limit 5] [--format text|json]
+         cm wiki route --query <text> [--budget 800] [--max-sections 2] [--task-size auto|small|medium|large] [--format text|json]
+         cm wiki excerpt --page <id> --query <text> [--budget 600] [--max-sections 2] [--format text|json]
+         cm wiki remember [--file cm] [--page <id>] [--scope repo] [--no-replace] [--include-unreviewed]
+         cm wiki generate --agent-cmd <command> [--review-cmd <command>] [--review-rounds 2] [--root <dir>] [--out .cm/wiki] [--max-pages <n>] [--page <id>]
          cm pack [--task <id>|current] [--budget 1200] [--snippets <n>] [--root <dir>] > pack.prompt
          cm absorb --input result.jsonl [--dry-run] [--replace] [--allow-long-text]
          cm claim --task <id>|current --owner <id> [--lease 30]
@@ -601,80 +388,6 @@ fn print_usage() {
          Internal/advanced commands: see README.",
         env!("CARGO_PKG_VERSION")
     );
-}
-
-pub(crate) fn create_store(path: &Path, empty: bool) -> Result<usize> {
-    if path.exists() {
-        bail!("file already exists: {}", path.display());
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    let header = Header {
-        created_at: crate::model::now_ms(),
-        block_table_off: HEADER_LEN as u64,
-        block_count: 0,
-        index_off: HEADER_LEN as u64,
-        index_len: 0,
-        index_raw_len: 0,
-        index_hash: 0,
-        data_start: HEADER_LEN as u64,
-        tail_start: HEADER_LEN as u64,
-        doc_count: 0,
-        generation: 0,
-        flags: 0,
-    };
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(&encode_header(&header))?;
-    let seeds = [
-        (
-            "fact",
-            "cm identity",
-            "cm 是单文件压缩 mmap 记忆库，使用 XXH3 校验记录",
-        ),
-        ("decision", "write model", "选择追加写，不做随机索引"),
-        ("decision", "deletion", "删除采用 tombstone 加按需 purge"),
-        (
-            "decision",
-            "merge strategy",
-            "合并使用 BM25 召回候选，MinHash 复核高度相似",
-        ),
-        ("constraint", "format", "不保留 Markdown 作为记忆"),
-        (
-            "procedure",
-            "read order",
-            "读取顺序为 header -> index -> records",
-        ),
-    ];
-    let records = if empty {
-        0
-    } else {
-        for (kind, subject, text) in seeds {
-            let memory = new_memory(
-                kind,
-                "cm",
-                subject,
-                text,
-                "init",
-                1.0,
-                Vec::new(),
-                None,
-                None,
-            );
-            file.write_all(&crate::store::encode_record(
-                2,
-                0,
-                &memory_payload(&memory),
-            )?)?;
-        }
-        seeds.len()
-    };
-    file.sync_all()?;
-    drop(file);
-    reindex_file(path)?;
-    Ok(records)
 }
 
 pub(crate) fn cmd_init(path: &Path, empty: bool) -> Result<()> {
@@ -953,261 +666,6 @@ fn frame_task(args: &[String]) -> Result<String> {
     arg_value(args, "--task").ok_or_else(|| anyhow!("frame requires --task"))
 }
 
-fn frame_subject(task: &str) -> String {
-    format!("frame:{task}")
-}
-
-fn append_values(target: &mut Vec<String>, values: Vec<String>) {
-    for value in values {
-        if !value.trim().is_empty() && !target.contains(&value) {
-            target.push(value);
-        }
-    }
-}
-
-fn parse_frame(memory: &crate::model::Memory) -> Option<TaskFrame> {
-    serde_json::from_str(&memory.text).ok()
-}
-
-fn collect_frames(store: &mut Store, limit: usize) -> Result<Vec<crate::model::Memory>> {
-    let scope_id = store.scope_id(FRAME_SCOPE)?;
-    let kind = kind_id(FRAME_KIND);
-    let tail = store.tail_view()?;
-    let mut hits: HashMap<String, crate::model::Memory> = HashMap::new();
-    if scope_id.is_some() {
-        for (doc_idx, _) in store.bm25("frame", scope_id, kind, None, None, limit.min(512))? {
-            let meta = store.doc_meta(doc_idx)?;
-            let memory = store.doc_memory(&meta)?;
-            if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("frame:") {
-                hits.insert(memory.id.clone(), memory);
-            }
-        }
-    }
-    for (_, memory) in tail.bm25(
-        "frame",
-        Some(FRAME_SCOPE),
-        Some(FRAME_KIND),
-        None,
-        limit.min(512),
-    ) {
-        if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("frame:") {
-            hits.insert(memory.id.clone(), memory);
-        }
-    }
-    let mut by_task: HashMap<String, crate::model::Memory> = HashMap::new();
-    for memory in hits.into_values() {
-        match by_task.get(&memory.subject) {
-            Some(existing) if existing.created_at >= memory.created_at => {}
-            _ => {
-                by_task.insert(memory.subject.clone(), memory);
-            }
-        }
-    }
-    let mut frames: Vec<_> = by_task.into_values().collect();
-    frames.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| a.subject.cmp(&b.subject))
-    });
-    frames.truncate(limit);
-    Ok(frames)
-}
-
-fn collect_feedback_stats(
-    store: &mut Store,
-    limit: usize,
-) -> Result<HashMap<String, FeedbackStats>> {
-    let scope_id = store.scope_id(FEEDBACK_SCOPE)?;
-    let kind = kind_id(FEEDBACK_KIND);
-    let tail = store.tail_view()?;
-    let mut hits: HashMap<String, crate::model::Memory> = HashMap::new();
-    if scope_id.is_some() {
-        for (doc_idx, _) in store.bm25("feedback", scope_id, kind, None, None, limit.min(512))? {
-            let meta = store.doc_meta(doc_idx)?;
-            let memory = store.doc_memory(&meta)?;
-            if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("feedback:") {
-                hits.insert(memory.id.clone(), memory);
-            }
-        }
-    }
-    for (_, memory) in tail.bm25(
-        "feedback",
-        Some(FEEDBACK_SCOPE),
-        Some(FEEDBACK_KIND),
-        None,
-        limit.min(512),
-    ) {
-        if !tail.hidden.contains(&memory.id) && memory.subject.starts_with("feedback:") {
-            hits.insert(memory.id.clone(), memory);
-        }
-    }
-    let mut stats: HashMap<String, FeedbackStats> = HashMap::new();
-    for memory in hits.into_values() {
-        let Ok(item) = serde_json::from_str::<Feedback>(&memory.text) else {
-            continue;
-        };
-        let entry = stats.entry(item.target).or_default();
-        match item.signal.as_str() {
-            "useful" => entry.useful += 1,
-            "stale" => entry.stale += 1,
-            "wrong" => entry.wrong += 1,
-            _ => {}
-        }
-        entry.last = entry.last.max(item.updated_at);
-    }
-    Ok(stats)
-}
-
-fn latest_frame(
-    store: &mut Store,
-    task: Option<&str>,
-) -> Result<Option<(crate::model::Memory, TaskFrame)>> {
-    let mut frames: Vec<(crate::model::Memory, TaskFrame)> = collect_frames(store, 512)?
-        .into_iter()
-        .filter_map(|memory| parse_frame(&memory).map(|frame| (memory, frame)))
-        .collect();
-    if let Some(task) = task.filter(|task| *task != "current") {
-        return Ok(frames
-            .into_iter()
-            .find(|(memory, _)| memory.subject == frame_subject(task)));
-    }
-    let index = frames
-        .iter()
-        .position(|(_, frame)| frame.status == "active")
-        .or_else(|| frames.iter().position(|(_, frame)| frame.status != "done"))
-        .unwrap_or(0);
-    if frames.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(frames.swap_remove(index)))
-}
-
-fn frame_query(frame: &TaskFrame) -> Option<String> {
-    let mut parts = vec![frame.goal.clone()];
-    parts.extend(frame.next.iter().cloned());
-    parts.extend(frame.open.iter().cloned());
-    parts.extend(frame.touches.iter().cloned());
-    parts.retain(|part| !part.trim().is_empty());
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
-}
-
-fn frame_query_for_task(path: &Path, task: &str) -> Result<String> {
-    let mut store = Store::open(path)?;
-    let (_, frame) = latest_frame(&mut store, Some(task))?
-        .ok_or_else(|| anyhow!("no frame for task {task:?}; pass --query"))?;
-    frame_query(&frame)
-        .ok_or_else(|| anyhow!("frame for task {task:?} has no goal or next steps; pass --query"))
-}
-
-fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> serde_json::Value {
-    json!({
-        "id": memory.id,
-        "task": frame.task,
-        "goal": frame.goal,
-        "status": frame.status,
-        "constraints": frame.constraints,
-        "next": frame.next,
-        "open": frame.open,
-        "touches": frame.touches,
-        "notes": frame.notes,
-        "owner": frame.owner,
-        "lease_until": frame.lease_until,
-        "updated_at": frame.updated_at
-    })
-}
-
-fn path_key(path: &str) -> String {
-    let trimmed = path.trim();
-    let without_dot = trimmed
-        .strip_prefix("./")
-        .map(str::to_string)
-        .unwrap_or_else(|| trimmed.to_string());
-    without_dot.replace('\\', "/").to_lowercase()
-}
-
-fn source_covers_path(source: &str, touch: &str) -> bool {
-    let Some((relative, _)) = source_parts(source) else {
-        return false;
-    };
-    let source_key = path_key(&relative.to_string_lossy());
-    let touch_key = path_key(touch);
-    if touch_key.is_empty() || source_key.is_empty() {
-        return false;
-    }
-    source_key == touch_key
-        || source_key.starts_with(&format!("{touch_key}:"))
-        || source_key.starts_with(&format!("{touch_key}/"))
-}
-
-fn uncovered_touches(frame: &TaskFrame, memories: &[crate::model::Memory]) -> Vec<String> {
-    frame
-        .touches
-        .iter()
-        .filter(|touch| {
-            !memories
-                .iter()
-                .any(|memory| source_covers_path(&memory.source, touch))
-        })
-        .cloned()
-        .collect()
-}
-
-fn ensure_frame_owner(frame: &TaskFrame, owner: Option<&str>, action: &str) -> Result<()> {
-    let now = crate::model::now_ms();
-    if let Some(existing) = frame.owner.as_deref() {
-        if frame.lease_until.is_some_and(|end| end > now) && owner != Some(existing) {
-            bail!(
-                "cannot {action} task {:?}: held by {} until {}; pass --owner {}",
-                frame.task,
-                existing,
-                frame.lease_until.unwrap_or(0),
-                existing
-            );
-        }
-    }
-    Ok(())
-}
-
-fn save_frame(
-    path: &Path,
-    frame: &TaskFrame,
-    existing_id: Option<String>,
-    source: &str,
-    source_commit: Option<String>,
-    locked: bool,
-) -> Result<crate::model::Memory> {
-    let input = AppendInput {
-        kind: FRAME_KIND.to_string(),
-        scope: FRAME_SCOPE.to_string(),
-        subject: frame_subject(&frame.task),
-        text: serde_json::to_string(frame)?,
-        source: source.to_string(),
-        confidence: 1.0,
-        valid_from: frame.updated_at,
-        valid_to: None,
-        supersedes: existing_id.into_iter().collect(),
-        conflict_of: None,
-        trust: Some("authored".to_string()),
-        source_commit,
-    };
-    let memory = memory_from_input(&input)?;
-    if locked {
-        crate::store::append_record_unlocked(
-            path,
-            crate::store::T_MEMORY,
-            &memory_payload(&memory),
-            true,
-        )?;
-    } else {
-        append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
-    }
-    Ok(memory)
-}
-
 fn cmd_frame_set(path: &Path, args: &[String]) -> Result<()> {
     let task = frame_task(args)?;
     let _lock = crate::store::acquire_store_lock(path)?;
@@ -1466,39 +924,6 @@ fn cmd_finish(path: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn write_feedback(
-    path: &Path,
-    id: &str,
-    signal: &str,
-    note: Option<&str>,
-    source: &str,
-) -> Result<()> {
-    let now = crate::model::now_ms();
-    let feedback = Feedback {
-        target: id.to_string(),
-        signal: signal.to_string(),
-        note: note.map(str::to_string),
-        updated_at: now,
-    };
-    let input = AppendInput {
-        kind: FEEDBACK_KIND.to_string(),
-        scope: FEEDBACK_SCOPE.to_string(),
-        subject: format!("feedback:{id}"),
-        text: serde_json::to_string(&feedback)?,
-        source: source.to_string(),
-        confidence: 1.0,
-        valid_from: now,
-        valid_to: None,
-        supersedes: Vec::new(),
-        conflict_of: None,
-        trust: Some("authored".to_string()),
-        source_commit: None,
-    };
-    let memory = memory_from_input(&input)?;
-    append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
-    Ok(())
-}
-
 fn cmd_feedback(path: &Path, args: &[String]) -> Result<()> {
     let ids = arg_values(args, "--id");
     if ids.is_empty() {
@@ -1518,14 +943,6 @@ fn cmd_feedback(path: &Path, args: &[String]) -> Result<()> {
         json!({"ok": true, "count": ids.len(), "signal": signal})
     );
     Ok(())
-}
-
-#[derive(Default)]
-struct FeedbackStats {
-    useful: u32,
-    stale: u32,
-    wrong: u32,
-    last: u64,
 }
 
 fn cmd_govern(path: &Path, args: &[String]) -> Result<()> {
@@ -1683,240 +1100,6 @@ fn run_govern(
 /// Relative paths reported by `git status --porcelain=v1 -z -uall`, normalized
 /// to lowercase forward slashes. Paths are relative to the git repository root,
 /// so `audit --changed` expects `--root` to be that root.
-pub(crate) fn changed_paths(root: &Path) -> Result<HashSet<String>> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("status")
-        .arg("--porcelain=v1")
-        .arg("-z")
-        .arg("-uall")
-        .output()
-        .context("run git status")?;
-    if !output.status.success() {
-        bail!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let data = String::from_utf8_lossy(&output.stdout);
-    let mut paths = HashSet::new();
-    for entry in data.split('\0').filter(|entry| !entry.is_empty()) {
-        // porcelain v1 -z stores `XY PATH` with exactly two status bytes.
-        let Some(path) = entry.get(3..) else {
-            continue;
-        };
-        let path = path.rsplit_once(" -> ").map(|(_, new)| new).unwrap_or(path);
-        if path.is_empty() {
-            continue;
-        }
-        paths.insert(path.replace('\\', "/").to_lowercase());
-    }
-    Ok(paths)
-}
-
-fn source_parts(source: &str) -> Option<(PathBuf, Option<String>)> {
-    let source = source.trim();
-    if source.is_empty() || source.starts_with("agent:") || source.contains("://") {
-        return None;
-    }
-    if let Some(index) = source.char_indices().find_map(|(index, ch)| {
-        if ch != ':' {
-            return None;
-        }
-        let left = &source[..index];
-        (left.len() > 1 && (left.contains('/') || left.contains('\\') || left.contains('.')))
-            .then_some(index)
-    }) {
-        let path = &source[..index];
-        let symbol = &source[index + 1..];
-        if !symbol.is_empty() {
-            return Some((PathBuf::from(path), Some(symbol.to_string())));
-        }
-    }
-    let path = PathBuf::from(source);
-    let pathish = source.contains('/') || source.contains('\\') || source.contains('.');
-    if pathish {
-        Some((path, None))
-    } else {
-        None
-    }
-}
-
-fn anchor_text(text: &str, symbol: Option<&str>) -> Option<(u32, String)> {
-    if let Some(symbol) = symbol {
-        let lines: Vec<&str> = text.lines().collect();
-        let index = find_symbol_line(&lines, symbol)?;
-        let start = index.saturating_sub(2);
-        let end = (index + 40).min(lines.len());
-        let excerpt = lines[start..end].join("\n");
-        Some((
-            (index + 1) as u32,
-            format!("{:016x}", xxh3_64(excerpt.as_bytes())),
-        ))
-    } else {
-        Some((0, format!("{:016x}", xxh3_64(text.as_bytes()))))
-    }
-}
-
-fn find_symbol_line(lines: &[&str], symbol: &str) -> Option<usize> {
-    let mut names = vec![symbol];
-    if let Some(last) = symbol.rsplit("::").next().filter(|last| *last != symbol) {
-        names.push(last);
-    }
-    if let Some(last) = symbol.rsplit('.').next().filter(|last| *last != symbol) {
-        names.push(last);
-    }
-    for name in names {
-        if let Some(index) = find_symbol_line_exact(lines, name) {
-            return Some(index);
-        }
-    }
-    None
-}
-
-fn find_symbol_line_exact(lines: &[&str], symbol: &str) -> Option<usize> {
-    const KEYWORDS: &[&str] = &[
-        "fn",
-        "function",
-        "def",
-        "class",
-        "struct",
-        "enum",
-        "trait",
-        "interface",
-        "type",
-        "const",
-        "let",
-        "var",
-        "impl",
-        "module",
-        "namespace",
-        "func",
-        "fun",
-        "record",
-        "object",
-        "protocol",
-        "extension",
-        "actor",
-    ];
-    const MODIFIERS: &[&str] = &[
-        "export",
-        "default",
-        "async",
-        "pub",
-        "public",
-        "private",
-        "protected",
-        "static",
-        "readonly",
-        "abstract",
-        "declare",
-        "override",
-        "final",
-        "open",
-        "unsafe",
-        "extern",
-        "sealed",
-        "mut",
-    ];
-    let mut fallback = None;
-    for (index, raw) in lines.iter().enumerate() {
-        let line = raw.trim_start();
-        if line.is_empty() || is_comment_line(line) {
-            continue;
-        }
-        let Some(start) = identifier_occurrence(line, symbol) else {
-            continue;
-        };
-        fallback.get_or_insert(index);
-        let prefix = line[..start].trim_end();
-        let previous = previous_word(prefix);
-        let after = line[start + symbol.len()..].trim_start();
-        if KEYWORDS.contains(&previous.as_str())
-            || (prefix
-                .split_whitespace()
-                .all(|word| MODIFIERS.contains(&word))
-                && after.starts_with(['(', '<', '=', '{', ':', '[', '!']))
-            || (prefix.starts_with("func ") && after.starts_with('('))
-        {
-            return Some(index);
-        }
-    }
-    fallback
-}
-
-fn is_comment_line(line: &str) -> bool {
-    line.starts_with("//")
-        || line.starts_with("/*")
-        || line.starts_with('*')
-        || line.starts_with("--")
-}
-
-fn identifier_occurrence(line: &str, symbol: &str) -> Option<usize> {
-    let mut search = 0usize;
-    while let Some(found) = line[search..].find(symbol) {
-        let start = search + found;
-        let end = start + symbol.len();
-        let before_ok = line[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !is_identifier_char(ch));
-        let after_ok = line[end..]
-            .chars()
-            .next()
-            .is_none_or(|ch| !is_identifier_char(ch));
-        if before_ok && after_ok {
-            return Some(start);
-        }
-        search = end;
-    }
-    None
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_' || ch == '$'
-}
-
-fn previous_word(prefix: &str) -> String {
-    prefix
-        .split_whitespace()
-        .next_back()
-        .unwrap_or_default()
-        .trim_matches(|ch: char| matches!(ch, '(' | ')' | '<' | '>' | '*' | '&' | '?' | '!'))
-        .to_string()
-}
-
-fn source_anchor(source: &str) -> Option<(u32, String)> {
-    let (relative, symbol) = source_parts(source)?;
-    let cwd = std::env::current_dir().ok()?;
-    let mut bases = vec![cwd.clone()];
-    let mut current = cwd.as_path();
-    while let Some(parent) = current.parent() {
-        bases.push(parent.to_path_buf());
-        current = parent;
-    }
-    for base in bases {
-        if let Ok(text) = fs::read_to_string(base.join(&relative)) {
-            return anchor_text(&text, symbol.as_deref());
-        }
-    }
-    None
-}
-
-fn source_snippet(memory: &crate::model::Memory, root: &Path, lines: usize) -> Option<String> {
-    let (relative, _) = source_parts(&memory.source)?;
-    let line = memory.source_line? as usize;
-    let text = fs::read_to_string(root.join(relative)).ok()?;
-    let all: Vec<&str> = text.lines().collect();
-    if all.is_empty() {
-        return None;
-    }
-    let start = line.saturating_sub(1);
-    let end = (start + lines.max(1)).min(all.len());
-    Some(all[start..end].join("\n"))
-}
-
 fn audit_source_issue(
     memory: &crate::model::Memory,
     full: &Path,
@@ -2147,127 +1330,19 @@ fn cmd_search(
 ) -> Result<()> {
     let output = search_out(
         path,
-        query,
-        top,
-        scope,
-        task,
-        kind,
-        min_score,
-        min_trust,
-        include_expired,
+        &SearchQuery {
+            query: query.to_string(),
+            top,
+            scope,
+            task,
+            kind,
+            min_score,
+            min_trust,
+            include_expired,
+        },
     )?;
     outln!("{}", serde_json::to_string(&output)?);
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn search_out(
-    path: &Path,
-    query: &str,
-    top: usize,
-    scope: Option<String>,
-    task: Option<String>,
-    kind: Option<String>,
-    min_score: f64,
-    min_trust: Option<String>,
-    include_expired: bool,
-) -> Result<SearchOut> {
-    let mut store = Store::open(path)?;
-    store.set_cache_affinity(scope.as_deref(), task.as_deref());
-    let tail = store.tail_view()?;
-    let scope_id = match scope.as_deref() {
-        Some(value) => store.scope_id(value)?,
-        None => None,
-    };
-    let kind_id = match kind.as_deref() {
-        Some(value) => match kind_id(value) {
-            Some(id) => Some(id),
-            None => {
-                return Ok(SearchOut {
-                    query: query.to_string(),
-                    candidates: Vec::new(),
-                });
-            }
-        },
-        None => None,
-    };
-    let allow_meta = kind
-        .as_deref()
-        .is_some_and(|kind| kind == FRAME_KIND || kind == FEEDBACK_KIND);
-    let min_rank = match min_trust.as_deref() {
-        Some(value) => trust_rank(value),
-        None => -1,
-    };
-    if min_trust.is_some() && min_rank < 0 {
-        bail!("invalid trust level {:?}", min_trust);
-    }
-    let now = crate::model::now_ms();
-    let mut hidden_docs = HashSet::new();
-    for id in &tail.hidden {
-        if let Some((doc_idx, _)) = store.find_doc(id)? {
-            hidden_docs.insert(doc_idx);
-        }
-    }
-    let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
-    if scope.is_none() || scope_id.is_some() {
-        for (doc_idx, score) in store.bm25(
-            query,
-            scope_id,
-            kind_id,
-            None,
-            Some(&hidden_docs),
-            top.min(100),
-        )? {
-            let meta = store.doc_meta(doc_idx)?;
-            let memory = store.doc_memory(&meta)?;
-            if !tail.hidden.contains(&memory.id) {
-                hits.insert(memory.id.clone(), (score, memory));
-            }
-        }
-    }
-    for (score, memory) in tail.bm25(query, scope.as_deref(), kind.as_deref(), None, top.min(100)) {
-        hits.insert(memory.id.clone(), (score, memory));
-    }
-    let mut candidates: Vec<SearchHit> = hits
-        .into_values()
-        .filter(|(bm25, memory)| {
-            (allow_meta || (memory.kind != FRAME_KIND && memory.kind != FEEDBACK_KIND))
-                && *bm25 >= min_score
-                && (include_expired || memory.valid_to.is_none_or(|end| end > now))
-                && trust_rank(&memory.trust) >= min_rank
-        })
-        .map(|(bm25, memory)| SearchHit {
-            id: memory.id.clone(),
-            bm25,
-            kind: memory.kind.clone(),
-            scope: memory.scope.clone(),
-            subject: memory.subject.clone(),
-            preview: preview(&memory.text, 160),
-        })
-        .collect();
-    candidates.sort_by(|a, b| {
-        b.bm25
-            .partial_cmp(&a.bm25)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    candidates.truncate(top);
-    let ids: Vec<String> = candidates.iter().map(|hit| hit.id.clone()).collect();
-    store.prefetch_memory_ids(&ids)?;
-    Ok(SearchOut {
-        query: query.to_string(),
-        candidates,
-    })
-}
-
-fn trust_rank(trust: &str) -> i32 {
-    match trust {
-        "verified" => 3,
-        "authored" => 2,
-        "imported" => 1,
-        "inferred" => 0,
-        _ => -1,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2288,9 +1363,20 @@ fn cmd_context(
     root: &Path,
 ) -> Result<()> {
     let mut store = Store::open(path)?;
-    let (selected, estimated) = select_context(
-        &mut store, query, budget, top, scope, task, kind, min_trust, max_items, min_score, compact,
-    )?;
+    let q = RecallQuery {
+        query: query.to_string(),
+        budget_tokens: budget,
+        top,
+        max_items,
+        scope,
+        task,
+        kind,
+        min_trust,
+        min_score,
+        compact,
+        snippet_lines,
+    };
+    let (selected, estimated) = select_context(&mut store, &q)?;
 
     match format.as_str() {
         "cmx" => {
@@ -2323,125 +1409,6 @@ fn cmd_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_context(
-    store: &mut Store,
-    query: &str,
-    budget: usize,
-    top: usize,
-    scope: Option<String>,
-    task: Option<String>,
-    kind: Option<String>,
-    min_trust: Option<String>,
-    max_items: usize,
-    min_score: f64,
-    compact: bool,
-) -> Result<(Vec<crate::model::Memory>, usize)> {
-    store.set_cache_affinity(scope.as_deref(), task.as_deref());
-    let tail = store.tail_view()?;
-    let now = crate::model::now_ms();
-    let min_rank = match min_trust.as_deref() {
-        Some(value) => trust_rank(value),
-        None => -1,
-    };
-    if min_rank < 0 && min_trust.is_some() {
-        bail!("invalid trust level {:?}", min_trust);
-    }
-    let scope_id = match scope.as_deref() {
-        Some(value) => store.scope_id(value)?,
-        None => None,
-    };
-    let kind_id = match kind.as_deref() {
-        Some(value) => match kind_id(value) {
-            Some(id) => Some(id),
-            None => {
-                bail!("invalid kind {:?}", value);
-            }
-        },
-        None => None,
-    };
-    let allow_meta = kind
-        .as_deref()
-        .is_some_and(|kind| kind == FRAME_KIND || kind == FEEDBACK_KIND);
-    let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
-    if scope.is_none() || scope_id.is_some() {
-        for (doc_idx, score) in store.bm25(
-            query,
-            scope_id,
-            kind_id,
-            None,
-            None,
-            top.saturating_mul(4).min(256),
-        )? {
-            let meta = store.doc_meta(doc_idx)?;
-            let memory = store.doc_memory(&meta)?;
-            if tail.hidden.contains(&memory.id) {
-                continue;
-            }
-            hits.insert(memory.id.clone(), (score, memory));
-        }
-    }
-    for (score, memory) in tail.bm25(
-        query,
-        scope.as_deref(),
-        kind.as_deref(),
-        None,
-        top.saturating_mul(4).min(256),
-    ) {
-        hits.insert(memory.id.clone(), (score, memory));
-    }
-    let mut candidates: Vec<(f64, crate::model::Memory)> = hits
-        .into_values()
-        .filter(|(score, memory)| {
-            let not_expired = memory.valid_to.is_none_or(|end| end > now);
-            let trust_ok = trust_rank(&memory.trust) >= min_rank;
-            (allow_meta || (memory.kind != FRAME_KIND && memory.kind != FEEDBACK_KIND))
-                && *score >= min_score
-                && not_expired
-                && trust_ok
-        })
-        .collect();
-    candidates.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
-
-    let mut selected = Vec::new();
-    let mut estimated = 0usize;
-    for (_, memory) in candidates {
-        if selected.len() >= max_items {
-            break;
-        }
-        let mut projected = memory;
-        if compact {
-            if !selected.is_empty() {
-                let snippet = memory_snippet(&projected, query, 240);
-                projected.text = snippet;
-            } else {
-                let line = cmx_line(&projected);
-                let line_tokens = estimate_tokens(&line);
-                if estimated + line_tokens > budget {
-                    let snippet = memory_snippet(&projected, query, 240);
-                    projected.text = snippet;
-                }
-            }
-        }
-        let line = cmx_line(&projected);
-        let line_tokens = estimate_tokens(&line);
-        if estimated + line_tokens > budget && !selected.is_empty() {
-            break;
-        }
-        if estimated + line_tokens > budget {
-            continue;
-        }
-        estimated += line_tokens;
-        selected.push(projected);
-    }
-    let ids: Vec<String> = selected.iter().map(|memory| memory.id.clone()).collect();
-    store.prefetch_memory_ids(&ids)?;
-    Ok((selected, estimated))
-}
-
 fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     let budget = arg_usize(args, "--budget", 1200);
     let format = arg_value(args, "--format").unwrap_or_else(|| "json".to_string());
@@ -2472,19 +1439,20 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
         }
     };
     let memory_budget = budget.saturating_sub(frame_tokens);
-    let (mut selected, _) = select_context(
-        &mut store,
-        &query,
-        memory_budget,
-        arg_usize(args, "--top", 16),
-        arg_value(args, "--scope"),
+    let q = RecallQuery {
+        query: query.clone(),
+        budget_tokens: memory_budget,
+        top: arg_usize(args, "--top", 16),
+        max_items: arg_usize(args, "--max-items", 5),
+        scope: arg_value(args, "--scope"),
         task,
-        None,
-        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
-        arg_usize(args, "--max-items", 5),
-        0.0,
-        true,
-    )?;
+        kind: None,
+        min_trust: Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
+        min_score: 0.0,
+        compact: true,
+        snippet_lines,
+    };
+    let (mut selected, _) = select_context(&mut store, &q)?;
     let feedback = collect_feedback_stats(&mut store, 1024)?;
     selected.retain(|memory| {
         feedback
@@ -2523,505 +1491,254 @@ fn cmd_brief(path: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn push_prompt_list(out: &mut String, label: &str, value: Option<&serde_json::Value>) {
-    let Some(items) = value.and_then(serde_json::Value::as_array) else {
-        return;
+fn cmd_wiki(args: &[String]) -> Result<()> {
+    let sub = args.get(1).map(String::as_str).ok_or_else(|| {
+        anyhow!(
+            "wiki requires plan, prompt, apply, review, status, check, find, route, excerpt, remember, next, or generate"
+        )
+    })?;
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
+    if !root.is_dir() {
+        bail!("wiki root is not a directory: {}", root.display());
+    }
+    let root = root.canonicalize().unwrap_or(root);
+    let out = match arg_value(args, "--out") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        None => root.join(crate::wiki::WIKI_DIR),
     };
-    if items.is_empty() {
-        return;
-    }
-    out.push_str(label);
-    out.push('\n');
-    for item in items {
-        if let Some(item) = item.as_str() {
-            out.push_str("- ");
-            out.push_str(item);
-            out.push('\n');
+    match sub {
+        "plan" => {
+            let max_modules = arg_usize(args, "--max-modules", crate::wiki::DEFAULT_MAX_MODULES);
+            let plan = crate::wiki::plan_with(&root, &out, max_modules)?;
+            outln!("{}", serde_json::to_string(&plan)?);
         }
-    }
-}
-
-fn brief_prompt(
-    frame: &Option<serde_json::Value>,
-    query: &str,
-    memories: &[BriefMemory],
-) -> String {
-    let mut out = String::new();
-    if let Some(frame) = frame {
-        out.push_str("TASK: ");
-        out.push_str(frame["task"].as_str().unwrap_or(""));
-        out.push('\n');
-        out.push_str("STATUS: ");
-        out.push_str(frame["status"].as_str().unwrap_or(""));
-        out.push('\n');
-        out.push_str("GOAL: ");
-        out.push_str(frame["goal"].as_str().unwrap_or(""));
-        out.push('\n');
-        push_prompt_list(&mut out, "CONSTRAINTS:", frame.get("constraints"));
-        push_prompt_list(&mut out, "NEXT:", frame.get("next"));
-        push_prompt_list(&mut out, "OPEN:", frame.get("open"));
-        push_prompt_list(&mut out, "TOUCHES:", frame.get("touches"));
-        push_prompt_list(&mut out, "NOTES:", frame.get("notes"));
-        if let Some(owner) = frame.get("owner").and_then(serde_json::Value::as_str) {
-            out.push_str("OWNER: ");
-            out.push_str(owner);
-            out.push('\n');
+        "prompt" => {
+            let page = arg_value(args, "--page")
+                .ok_or_else(|| anyhow!("wiki prompt requires --page <id>"))?;
+            outln!("{}", crate::wiki::prompt(&out, &page)?);
         }
-        if let Some(lease) = frame.get("lease_until").and_then(serde_json::Value::as_u64) {
-            out.push_str("LEASE_UNTIL: ");
-            out.push_str(&lease.to_string());
-            out.push('\n');
+        "apply" => {
+            let page = arg_value(args, "--page")
+                .ok_or_else(|| anyhow!("wiki apply requires --page <id>"))?;
+            let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
+            let content = if input == "-" {
+                io::read_to_string(io::stdin())?
+            } else {
+                fs::read_to_string(&input)?
+            };
+            let state = crate::wiki::apply(&out, &page, &content)?;
+            outln!(
+                "{}",
+                json!({"ok": true, "page": state.page.id, "file": out.join(state.file).display().to_string(), "status": state.status})
+            );
         }
-    }
-    out.push_str("QUERY: ");
-    out.push_str(query);
-    out.push_str("\n\n");
-    for memory in memories {
-        out.push('[');
-        out.push_str(&memory.id);
-        out.push_str("] ");
-        out.push_str(&memory.kind);
-        out.push(' ');
-        out.push_str(&memory.subject);
-        out.push('\n');
-        out.push_str(&memory.text);
-        out.push('\n');
-        if !memory.source.is_empty() {
-            out.push_str("source: ");
-            out.push_str(&memory.source);
-            if let Some(line) = memory.source_line {
-                out.push(':');
-                out.push_str(&line.to_string());
-            }
-            out.push('\n');
-        }
-        if let Some(snippet) = &memory.snippet {
-            out.push_str("snippet:\n");
-            out.push_str(snippet);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    out
-}
-
-fn json_tokens(memories: &[BriefMemory]) -> Result<usize> {
-    let mut total = 0usize;
-    for memory in memories {
-        total += estimate_tokens(&serde_json::to_string(memory)?);
-    }
-    Ok(total)
-}
-
-struct ExploreKnown {
-    memory: crate::model::Memory,
-    preview: String,
-}
-
-struct ExploreTarget {
-    path: String,
-    reason: String,
-}
-
-fn ensure_explore_frame(
-    path: &Path,
-    root: &Path,
-    requested_task: Option<&str>,
-) -> Result<(String, Option<TaskFrame>)> {
-    let repo = root
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "repo".to_string());
-    let default_task = format!("explore:{repo}");
-    let mut store = Store::open(path)?;
-    match requested_task {
-        Some("current") => {
-            if let Some((memory, frame)) = latest_frame(&mut store, Some("current"))? {
-                return Ok((memory.id, Some(frame)));
+        "review" => {
+            let page = arg_value(args, "--page")
+                .ok_or_else(|| anyhow!("wiki review requires --page <id>"))?;
+            let command = arg_value(args, "--review-cmd")
+                .or_else(|| env::var("CM_WIKI_REVIEW_AGENT").ok())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "wiki review requires --review-cmd \"<command>\" or CM_WIKI_REVIEW_AGENT"
+                    )
+                })?;
+            let review = crate::wiki::review(&out, &page, &command)?;
+            outln!("{}", serde_json::to_string(&review)?);
+            if review.verdict != "pass" || !review.issues.is_empty() {
+                process::exit(1);
             }
         }
-        Some(task) => {
-            if let Some((memory, frame)) = latest_frame(&mut store, Some(task))? {
-                return Ok((memory.id, Some(frame)));
+        "status" | "list" => {
+            let status = crate::wiki::status(&out)?;
+            outln!("{}", serde_json::to_string(&status)?);
+        }
+        "check" => {
+            let report = crate::wiki::check_with(&out, has_flag(args, "--strict"))?;
+            outln!("{}", serde_json::to_string(&report)?);
+            if has_flag(args, "--strict") && !report.issues.is_empty() {
+                process::exit(1);
             }
         }
-        None => {
-            // Reuse an active task instead of hijacking `current` with an
-            // exploration-only frame. If no task is active, reuse the repo's
-            // exploration frame when one exists.
-            if let Some((memory, frame)) = latest_frame(&mut store, Some("current"))? {
-                if frame.status == "active" {
-                    return Ok((memory.id, Some(frame)));
+        "find" => {
+            let query = arg_value(args, "--query")
+                .ok_or_else(|| anyhow!("wiki find requires --query <text>"))?;
+            let matches = crate::wiki::find(&out, &query, arg_usize(args, "--limit", 5))?;
+            match arg_value(args, "--format").as_deref() {
+                Some("json") => outln!("{}", serde_json::to_string(&matches)?),
+                Some("text") | None => {
+                    for item in matches {
+                        outln!(
+                            "{:.2}\t{}\t{}\t{}",
+                            item.score,
+                            item.page,
+                            item.title,
+                            item.headings.join(" | ")
+                        );
+                    }
+                }
+                Some(other) => bail!("invalid wiki find format {other:?}; expected text or json"),
+            }
+        }
+        "route" => {
+            let query = arg_value(args, "--query")
+                .ok_or_else(|| anyhow!("wiki route requires --query <text>"))?;
+            let task_size = arg_value(args, "--task-size").unwrap_or_else(|| "auto".to_string());
+            let plan = crate::wiki::route(
+                &out,
+                &query,
+                arg_usize(args, "--budget", 800),
+                arg_usize(args, "--max-sections", 2),
+                &task_size,
+            )?;
+            match arg_value(args, "--format").as_deref() {
+                Some("json") => outln!("{}", serde_json::to_string(&plan)?),
+                Some("text") | None => {
+                    if plan.text.is_empty() {
+                        outln!("# no wiki context: {}", plan.reasons.join("; "));
+                    } else {
+                        outln!("{}", plan.text);
+                    }
+                }
+                Some(other) => bail!("invalid wiki route format {other:?}; expected text or json"),
+            }
+        }
+        "excerpt" => {
+            let page = arg_value(args, "--page")
+                .ok_or_else(|| anyhow!("wiki excerpt requires --page <id>"))?;
+            let query = arg_value(args, "--query")
+                .ok_or_else(|| anyhow!("wiki excerpt requires --query <text>"))?;
+            let excerpt = crate::wiki::excerpt(
+                &out,
+                &page,
+                &query,
+                arg_usize(args, "--budget", 600),
+                arg_usize(args, "--max-sections", 2),
+            )?;
+            match arg_value(args, "--format").as_deref() {
+                Some("json") => outln!("{}", serde_json::to_string(&excerpt)?),
+                Some("text") | None => outln!("{}", excerpt.text),
+                Some(other) => {
+                    bail!("invalid wiki excerpt format {other:?}; expected text or json")
                 }
             }
-            if let Some((memory, frame)) = latest_frame(&mut store, Some(&default_task))? {
-                return Ok((memory.id, Some(frame)));
-            }
         }
-    }
-    drop(store);
-    let task = requested_task
-        .filter(|task| *task != "current")
-        .map(str::to_string)
-        .unwrap_or(default_task);
-    let frame = TaskFrame {
-        task,
-        goal: format!("Explore repository {repo} and record high-signal cm memory"),
-        status: "active".to_string(),
-        constraints: Vec::new(),
-        next: vec!["follow the explore protocol and absorb the result".to_string()],
-        open: Vec::new(),
-        touches: Vec::new(),
-        notes: Vec::new(),
-        owner: None,
-        lease_until: None,
-        updated_at: crate::model::now_ms(),
-    };
-    let memory = save_frame(path, &frame, None, "agent:explore", None, false)?;
-    Ok((memory.id, Some(frame)))
-}
-
-fn display_explore_root(root: &Path) -> String {
-    let text = root.to_string_lossy().replace('\\', "/");
-    text.strip_prefix("//?/").unwrap_or(&text).to_string()
-}
-
-fn explore_source_path(memory: &crate::model::Memory) -> Option<String> {
-    source_parts(&memory.source).map(|(path, _)| {
-        path.to_string_lossy()
-            .replace('\\', "/")
-            .trim_start_matches("./")
-            .to_string()
-    })
-}
-
-fn collect_explore_known(
-    store: &mut Store,
-    query: &str,
-    task: Option<&str>,
-    active: &[crate::model::Memory],
-) -> Result<Vec<ExploreKnown>> {
-    let mut known = Vec::new();
-    let mut seen = HashSet::new();
-    let (selected, _) = select_context(
-        store,
-        query,
-        1000,
-        32,
-        None,
-        task.map(str::to_string),
-        None,
-        Some("imported".to_string()),
-        12,
-        0.0,
-        true,
-    )?;
-    for memory in selected {
-        seen.insert(memory.id.clone());
-        known.push(ExploreKnown {
-            preview: memory_snippet(&memory, query, 180),
-            memory,
-        });
-    }
-    let mut recent: Vec<crate::model::Memory> = active
-        .iter()
-        .filter(|memory| !matches!(memory.kind.as_str(), FRAME_KIND | FEEDBACK_KIND))
-        .filter(|memory| !seen.contains(&memory.id))
-        .cloned()
-        .collect();
-    recent.sort_by(|left, right| {
-        right
-            .created_at
-            .cmp(&left.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    for memory in recent {
-        if known.len() >= 24 {
-            break;
+        "remember" => {
+            let file = PathBuf::from(arg_value(args, "--file").unwrap_or_else(|| "cm".to_string()));
+            let scope = arg_value(args, "--scope").unwrap_or_else(|| "repo".to_string());
+            let report = crate::wiki::remember_pages(
+                &file,
+                &out,
+                arg_value(args, "--page").as_deref(),
+                &scope,
+                !has_flag(args, "--no-replace"),
+                !has_flag(args, "--include-unreviewed"),
+            )?;
+            outln!("{}", serde_json::to_string(&report)?);
         }
-        seen.insert(memory.id.clone());
-        known.push(ExploreKnown {
-            preview: memory_snippet(&memory, query, 180),
-            memory,
-        });
-    }
-    Ok(known)
-}
-
-fn explore_coverage(memories: &[crate::model::Memory], path: &str) -> usize {
-    memories
-        .iter()
-        .filter(|memory| {
-            explore_source_path(memory).is_some_and(|source| {
-                source == path
-                    || source
-                        .strip_prefix(path)
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-        })
-        .count()
-}
-
-fn collect_explore_targets(
-    mode: &str,
-    scan: &RepoScan,
-    changed: &[String],
-    frame: Option<&TaskFrame>,
-    known: &[ExploreKnown],
-    active: &[crate::model::Memory],
-) -> Vec<ExploreTarget> {
-    let mut targets = Vec::new();
-    let mut seen = HashSet::new();
-    let mut push = |path: String, reason: String| {
-        let path = path.replace('\\', "/").trim_start_matches("./").to_string();
-        if path.is_empty() || !seen.insert(path.clone()) {
-            return;
-        }
-        targets.push(ExploreTarget { path, reason });
-    };
-    if mode == "macro" {
-        for manifest in &scan.manifests {
-            push(
-                manifest.clone(),
-                "manifest: build, test, or workspace boundary".to_string(),
-            );
-        }
-        for entrypoint in &scan.entrypoints {
-            push(
-                entrypoint.clone(),
-                "entry point: trace a runtime path".to_string(),
-            );
-        }
-        for dir in &scan.top_dirs {
-            let covered = explore_coverage(active, &dir.path);
-            push(
-                dir.path.clone(),
-                format!(
-                    "{} source files / {} files; {} active memories cite this area",
-                    dir.sources, dir.files, covered
-                ),
-            );
-        }
-    } else {
-        for path in changed {
-            push(path.clone(), "git-changed file".to_string());
-        }
-        if let Some(frame) = frame {
-            for touch in &frame.touches {
-                push(touch.clone(), "task frame touch".to_string());
-            }
-        }
-        for known in known {
-            if let Some(path) = explore_source_path(&known.memory) {
-                push(path, "existing memory source: verify or update".to_string());
-            }
-        }
-        for dir in &scan.top_dirs {
-            if explore_coverage(active, &dir.path) == 0 {
-                push(
-                    dir.path.clone(),
-                    format!("uncovered area: {} source files", dir.sources),
-                );
-            }
-        }
-    }
-    drop(push);
-    targets.truncate(28);
-    if targets.is_empty() {
-        targets.push(ExploreTarget {
-            path: ".".to_string(),
-            reason: "repository root".to_string(),
-        });
-    }
-    targets
-}
-
-fn explore_mode(
-    requested: &str,
-    active_count: usize,
-    changed: &[String],
-    frame: Option<&TaskFrame>,
-    explicit_query: bool,
-) -> Result<&'static str> {
-    match requested {
-        "macro" => Ok("macro"),
-        "micro" => Ok("micro"),
-        "auto" => {
-            if active_count == 0 {
-                return Ok("macro");
-            }
-            let touches = frame.is_some_and(|frame| !frame.touches.is_empty());
-            if !changed.is_empty() || touches || explicit_query {
-                Ok("micro")
+        "generate" => {
+            let command = arg_value(args, "--agent-cmd")
+                .or_else(|| env::var("CM_WIKI_AGENT").ok())
+                .ok_or_else(|| {
+                    anyhow!("wiki generate requires --agent-cmd \"<command>\" or CM_WIKI_AGENT")
+                })?;
+            let review_cmd =
+                arg_value(args, "--review-cmd").or_else(|| env::var("CM_WIKI_REVIEW_AGENT").ok());
+            let rounds = arg_usize(args, "--review-rounds", 2);
+            let report = if let Some(page) = arg_value(args, "--page") {
+                crate::wiki::generate_reviewed_page(
+                    &out,
+                    &command,
+                    review_cmd.as_deref(),
+                    rounds,
+                    &page,
+                )?
             } else {
-                Ok("macro")
+                crate::wiki::generate_reviewed(
+                    &out,
+                    &command,
+                    review_cmd.as_deref(),
+                    rounds,
+                    arg_usize(args, "--max-pages", 0),
+                )?
+            };
+            outln!("{}", serde_json::to_string(&report)?);
+        }
+        "next" => {
+            let next = crate::wiki::next(&out)?;
+            match next {
+                Some((state, prompt)) => outln!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "done": false,
+                        "page": state.page.id,
+                        "status": state.status,
+                        "prompt": prompt
+                    }))?
+                ),
+                None => outln!("{}", json!({"done": true})),
             }
         }
-        other => bail!("invalid explore mode {other:?}; expected auto, macro, or micro"),
+        other => {
+            bail!("invalid wiki command {other:?}; expected plan, prompt, apply, review, status, check, find, route, excerpt, remember, next, or generate")
+        }
     }
+    Ok(())
 }
 
-fn explore_protocol(mode: &str) -> &'static str {
-    if mode == "macro" {
-        "1. Read manifests and entry points first; do not walk the whole repository.\n\
-         2. Map the top-level packages/modules and the boundary between them.\n\
-         3. Identify build, test, and release commands, including required environment.\n\
-         4. Trace one or two critical runtime paths from an entry point to storage/network.\n\
-         5. Record durable architecture facts, constraints, procedures, and non-obvious edge cases.\n\
-         6. Skip README marketing, file-by-file inventories, and generic summaries."
-    } else {
-        "1. Start with TARGETS: changed files, frame touches, and existing memory sources.\n\
-         2. Read only those files and their direct callers, callees, and tests.\n\
-         3. Compare existing memories on those paths; supersede stale behavior and forget only proven dead claims.\n\
-         4. Record delta facts: changed invariants, edge cases, commands, and caller contracts.\n\
-         5. Do not re-summarize unchanged modules or repeat the whole architecture."
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ExplorePromptInput<'a> {
-    mode: &'a str,
-    root: &'a Path,
-    task: Option<&'a str>,
-    query: &'a str,
-    evidence_id: &'a str,
-    scan: &'a RepoScan,
-    changed: &'a [String],
-    known: &'a [ExploreKnown],
-    active_count: usize,
-    anchored_count: usize,
-    targets: &'a [ExploreTarget],
-    max_items: usize,
-}
-
-fn build_explore_prompt(input: ExplorePromptInput<'_>) -> String {
-    let ExplorePromptInput {
-        mode,
-        root,
-        task,
-        query,
-        evidence_id,
-        scan,
-        changed,
-        known,
-        active_count,
-        anchored_count,
-        targets,
-        max_items,
-    } = input;
-    let mut out = String::new();
-    let mut line = |text: &str| {
-        out.push_str(text);
-        out.push('\n');
+fn cmd_explore_mechanical(path: &Path, root: &Path, args: &[String]) -> Result<()> {
+    let options = crate::explore_api::ExploreOptions {
+        root: root.to_path_buf(),
+        mode: crate::explore_api::ExploreMode::Auto,
+        task: arg_value(args, "--task"),
+        query: None,
+        changed: None,
+        max_targets: 28,
     };
-    line("You are exploring a repository to build cm, a compact source-grounded memory for coding agents.");
-    line("Return only strict JSONL memory operations. No markdown, no prose, no analysis.");
-    line("");
-    line("EXPLORATION");
-    line(&format!("MODE: {mode}"));
-    line(&format!("ROOT: {}", display_explore_root(root)));
-    line(&format!("TASK: {}", task.unwrap_or("(none)")));
-    line(&format!("QUERY: {query}"));
-    line(&format!("EVIDENCE_ID: {evidence_id}"));
-    line(&format!("MAX_RECORDS: {max_items}"));
-    line("");
-    line("REPOSITORY SNAPSHOT");
-    line(&format!(
-        "files: {} (source files: {})",
-        scan.files, scan.source_files
-    ));
-    if !scan.manifests.is_empty() {
-        line("manifests:");
-        for manifest in &scan.manifests {
-            line(&format!("- {manifest}"));
-        }
+    let apply = has_flag(args, "--apply");
+    let plan = mechanical_explore(path, &options, apply)?;
+    let format = arg_value(args, "--format").unwrap_or_else(|| "json".to_string());
+    match format.as_str() {
+        "json" => outln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "ok": true,
+                "mode": plan.mode,
+                "frame_id": plan.frame_id,
+                "records": plan.records,
+                "dry_run": !apply,
+                "report": plan.report,
+                "ops": (!apply).then_some(plan.ops)
+            }))?
+        ),
+        "jsonl" => outln!("{}", plan.ops),
+        other => bail!("invalid mechanical format {other:?}; expected json or jsonl"),
     }
-    if !scan.entrypoints.is_empty() {
-        line("entry points:");
-        for entrypoint in &scan.entrypoints {
-            line(&format!("- {entrypoint}"));
-        }
-    }
-    if !scan.top_dirs.is_empty() {
-        line("top-level areas:");
-        for dir in &scan.top_dirs {
-            line(&format!(
-                "- {}: {} files, {} source files",
-                dir.path, dir.files, dir.sources
-            ));
-        }
-    }
-    if !changed.is_empty() {
-        line("git changes:");
-        for path in changed.iter().take(40) {
-            line(&format!("- {path}"));
-        }
-    }
-    line("");
-    line("EXISTING MEMORY");
-    line(&format!(
-        "active records: {active_count}; source-anchored: {anchored_count}"
-    ));
-    if known.is_empty() {
-        line("none; this is a first exploration.");
-    } else {
-        line("known records (use their ids for supersede/forget/evidence):");
-        for known in known {
-            line(&format!(
-                "- {} | {} | {} | {} | {}",
-                known.memory.id,
-                known.memory.kind,
-                known.memory.subject,
-                known.memory.source,
-                known.preview.replace('\n', " ")
-            ));
-        }
-    }
-    line("");
-    line("TARGETS");
-    for target in targets {
-        line(&format!("- {}: {}", target.path, target.reason));
-    }
-    line("");
-    line("COVERAGE");
-    if mode == "macro" {
-        line("- Cover every top-level area that has durable behavior with at least one record; do not spend the whole budget on one package.");
-        line("- Use the full MAX_RECORDS budget for distinct high-value claims, not variations of one claim.");
-    } else {
-        line("- Cover each changed or touched target that has a durable delta; do not re-summarize untouched modules.");
-        line("- Prefer several precise deltas over one broad module summary.");
-    }
-    line("");
-    line("PROTOCOL");
-    for step in explore_protocol(mode).lines() {
-        line(step);
-    }
-    line("");
-    line("QUALITY BAR");
-    line("- One claim per record; 1-3 sentences; text <=800 characters.");
-    line("- Prefer exact identifiers, paths, commands, invariants, and edge cases; no generic advice.");
-    line("- source must point at the line that proves the claim: path:symbol. Use a bare path only when the whole file is the claim.");
-    line("- Do not restate README/docs, invent symbols, or record file-by-file inventories.");
-    line("- Do not duplicate a known subject: use supersede with the existing id instead.");
-    line("- If nothing durable is learned, return an empty response. Prefer 0 records over low-value noise.");
-    line("");
-    line("OUTPUT");
-    line("Exactly one JSON object per line, one of:");
-    line("{\"op\":\"remember\",\"kind\":\"fact|decision|preference|constraint|episode|procedure\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"<=800 chars\",\"source\":\"path:symbol\",\"evidence\":[\"<id>\"],\"confidence\":0.0}");
-    line("{\"op\":\"supersede\",\"kind\":\"...\",\"scope\":\"...\",\"subject\":\"...\",\"text\":\"...\",\"source\":\"path:symbol\",\"supersedes\":[\"<existing-id>\"],\"evidence\":[\"<id>\"]}");
-    line("{\"op\":\"forget\",\"id\":\"<existing-id>\",\"reason\":\"...\"}");
-    line("");
-    line(&format!(
-        "For every new observation, evidence must contain \"{evidence_id}\" or a specific known-memory id."
-    ));
-    line("Never create kind=frame or kind=feedback. Never invent a source. Never use a reserved __cm_* scope.");
-    out
+    Ok(())
 }
 
 fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
+    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
+    if !root.is_dir() {
+        bail!("explore root is not a directory: {}", root.display());
+    }
+    let root = root.canonicalize().unwrap_or(root);
+    if has_flag(args, "--mechanical") {
+        return cmd_explore_mechanical(path, &root, args);
+    }
     if let Some(input) = arg_value(args, "--apply") {
-        let mut forwarded = vec!["--input".to_string(), input];
+        let mut forwarded = vec![
+            "--input".to_string(),
+            input,
+            "--root".to_string(),
+            root.to_string_lossy().to_string(),
+        ];
         for flag in ["--dry-run", "--replace", "--allow-long-text"] {
             if has_flag(args, flag) {
                 forwarded.push(flag.to_string());
@@ -3029,11 +1746,6 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
         }
         return cmd_absorb(path, &forwarded);
     }
-    let root = PathBuf::from(arg_value(args, "--root").unwrap_or_else(|| ".".to_string()));
-    if !root.is_dir() {
-        bail!("explore root is not a directory: {}", root.display());
-    }
-    let root = root.canonicalize().unwrap_or(root);
     let requested_mode = arg_value(args, "--mode").unwrap_or_else(|| "auto".to_string());
     let requested_task = arg_value(args, "--task");
     let explicit_query = arg_value(args, "--query");
@@ -3144,6 +1856,10 @@ fn cmd_explore(path: &Path, args: &[String]) -> Result<()> {
             "files": dir.files,
             "sources": dir.sources
         })).collect::<Vec<_>>(),
+        "areas": scan.areas.iter().map(|area| json!({
+            "path": area.path,
+            "sources": area.sources
+        })).collect::<Vec<_>>(),
         "manifests": scan.manifests,
         "entrypoints": scan.entrypoints,
         "changed": changed
@@ -3217,19 +1933,20 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
         }
     };
     let memory_budget = budget.saturating_sub(frame_tokens);
-    let (mut selected, _) = select_context(
-        &mut store,
-        &query,
-        memory_budget,
-        arg_usize(args, "--top", 16),
-        arg_value(args, "--scope"),
+    let q = RecallQuery {
+        query: query.clone(),
+        budget_tokens: memory_budget,
+        top: arg_usize(args, "--top", 16),
+        max_items: arg_usize(args, "--max-items", 8),
+        scope: arg_value(args, "--scope"),
         task,
-        None,
-        Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
-        arg_usize(args, "--max-items", 8),
-        0.0,
-        true,
-    )?;
+        kind: None,
+        min_trust: Some(arg_value(args, "--min-trust").unwrap_or_else(|| "imported".to_string())),
+        min_score: 0.0,
+        compact: true,
+        snippet_lines,
+    };
+    let (mut selected, _) = select_context(&mut store, &q)?;
     let feedback = collect_feedback_stats(&mut store, 1024)?;
     selected.retain(|memory| {
         feedback
@@ -3276,224 +1993,32 @@ fn cmd_pack(path: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn parse_absorb_ops(content: &str) -> Result<Vec<AbsorbOp>> {
-    let mut ops = Vec::new();
-    for (index, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line == "```" || line == "```json" {
-            continue;
-        }
-        let op: AbsorbOp = serde_json::from_str(line)
-            .with_context(|| format!("line {}: invalid JSONL", index + 1))?;
-        ops.push(op);
-    }
-    Ok(ops)
-}
-
-fn validate_absorb_ops(store: &mut Store, ops: &[AbsorbOp], allow_long_text: bool) -> Result<()> {
-    let mut superseded = HashSet::new();
-    for (index, op) in ops.iter().enumerate() {
-        let line = index + 1;
-        match op.op.as_str() {
-            "remember" | "supersede" => {
-                let kind = op
-                    .kind
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("line {line}: kind is required"))?;
-                let scope = op
-                    .scope
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("line {line}: scope is required"))?;
-                if scope.trim().is_empty() {
-                    bail!("line {line}: scope must not be empty");
-                }
-                let subject = op
-                    .subject
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("line {line}: subject is required"))?;
-                if subject.trim().is_empty() {
-                    bail!("line {line}: subject must not be empty");
-                }
-                let text = op
-                    .text
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("line {line}: text is required"))?;
-                if text.trim().is_empty() {
-                    bail!("line {line}: text must not be empty");
-                }
-                let source = op
-                    .source
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("line {line}: source is required"))?;
-                if source.trim().is_empty() {
-                    bail!("line {line}: source must not be empty");
-                }
-                if matches!(kind, "frame" | "feedback") {
-                    bail!("line {line}: kind {kind:?} is reserved");
-                }
-                if scope.starts_with("__cm_") {
-                    bail!("line {line}: scope {scope:?} is reserved");
-                }
-                if !allow_long_text && text.chars().count() > 800 {
-                    bail!("line {line}: text must be <=800 chars; pass --allow-long-text to re-anchor existing records");
-                }
-                if op.evidence.is_empty() {
-                    bail!("line {line}: evidence is required");
-                }
-                for id in &op.evidence {
-                    if !active_memory_exists(store, id)? {
-                        bail!("line {line}: evidence memory not found: {id}");
-                    }
-                }
-                if let Some(reason) = &op.reason {
-                    if reason.chars().count() > 200 {
-                        bail!("line {line}: reason must be <=200 chars");
-                    }
-                }
-                if op.op == "supersede" {
-                    let mut targets = op.supersedes.clone();
-                    if let Some(id) = &op.id {
-                        targets.push(id.clone());
-                    }
-                    if targets.is_empty() {
-                        bail!("line {line}: supersede requires supersedes or id");
-                    }
-                    for id in targets {
-                        if !superseded.insert(id.clone()) {
-                            bail!("line {line}: memory {id} is superseded more than once");
-                        }
-                        if !active_memory_exists(store, &id)? {
-                            bail!("line {line}: superseded memory not found: {id}");
-                        }
-                    }
-                }
-                if source_parts(source).is_some() && source_anchor(source).is_none() {
-                    bail!("line {line}: source does not anchor: {source:?}");
-                }
-            }
-            "forget" => {
-                let Some(id) = op.id.as_deref() else {
-                    bail!("line {line}: forget requires id");
-                };
-                if !active_memory_exists(store, id)? {
-                    bail!("line {line}: active memory not found: {id}");
-                }
-            }
-            other => bail!("line {line}: invalid op {other:?}; expected remember/supersede/forget"),
-        }
-    }
-    Ok(())
-}
-
-fn absorb_input(path: &Path, op: &AbsorbOp, replace: bool) -> Result<AppendInput> {
-    let mut supersedes = op.supersedes.clone();
-    if let Some(id) = &op.id {
-        supersedes.push(id.clone());
-    }
-    if replace && op.op == "remember" && supersedes.is_empty() {
-        if let Some(existing) = op
-            .kind
-            .as_deref()
-            .zip(op.scope.as_deref())
-            .zip(op.subject.as_deref())
-            .and_then(|((kind, scope), subject)| {
-                crate::store::find_subject_memory(path, scope, kind, subject).ok()
-            })
-            .flatten()
-        {
-            supersedes.push(existing.id);
-        }
-    }
-    Ok(AppendInput {
-        kind: op.kind.clone().unwrap_or_default(),
-        scope: op.scope.clone().unwrap_or_default(),
-        subject: op.subject.clone().unwrap_or_default(),
-        text: op.text.clone().unwrap_or_default(),
-        source: op.source.clone().unwrap_or_default(),
-        confidence: op.confidence.unwrap_or(0.8).clamp(0.0, 1.0),
-        valid_from: 0,
-        valid_to: None,
-        supersedes,
-        conflict_of: None,
-        trust: Some("authored".to_string()),
-        source_commit: None,
-    })
-}
-
-enum AbsorbOutcome {
-    Written,
-    Duplicate,
-    Forgotten,
-}
-
-fn apply_absorb_op(path: &Path, op: &AbsorbOp, replace: bool) -> Result<AbsorbOutcome> {
-    match op.op.as_str() {
-        "remember" | "supersede" => {
-            let input = absorb_input(path, op, replace)?;
-            let memory = memory_from_input(&input)?;
-            if find_tail_duplicate(path, &memory)?.is_some() {
-                return Ok(AbsorbOutcome::Duplicate);
-            }
-            append_record(path, crate::store::T_MEMORY, &memory_payload(&memory), true)?;
-            Ok(AbsorbOutcome::Written)
-        }
-        "forget" => {
-            let id = op.id.clone().unwrap_or_default();
-            append_tombstone(path, &id, op.reason.as_deref().unwrap_or("absorb"))?;
-            Ok(AbsorbOutcome::Forgotten)
-        }
-        other => bail!("invalid op {other:?}"),
-    }
-}
-
 fn cmd_absorb(path: &Path, args: &[String]) -> Result<()> {
     let input = arg_value(args, "--input").unwrap_or_else(|| "-".to_string());
     let dry_run = has_flag(args, "--dry-run");
     let replace = has_flag(args, "--replace");
     let allow_long_text = has_flag(args, "--allow-long-text");
+    let root = arg_value(args, "--root").map(PathBuf::from);
     let content = if input == "-" {
         io::read_to_string(io::stdin())?
     } else {
         fs::read_to_string(&input)?
     };
-    let ops = parse_absorb_ops(&content)?;
-    let mut store = Store::open(path)?;
-    validate_absorb_ops(&mut store, &ops, allow_long_text)?;
-    drop(store);
-    let mut written = 0usize;
-    let mut duplicates = 0usize;
-    let mut forgotten = 0usize;
-    if !dry_run {
-        for op in &ops {
-            match apply_absorb_op(path, op, replace)? {
-                AbsorbOutcome::Written => written += 1,
-                AbsorbOutcome::Duplicate => duplicates += 1,
-                AbsorbOutcome::Forgotten => forgotten += 1,
-            }
-        }
-    } else {
-        for op in &ops {
-            if matches!(op.op.as_str(), "remember" | "supersede") {
-                let input = absorb_input(path, op, replace)?;
-                let memory = memory_from_input(&input)?;
-                if find_tail_duplicate(path, &memory)?.is_some() {
-                    duplicates += 1;
-                } else {
-                    written += 1;
-                }
-            } else {
-                forgotten += 1;
-            }
-        }
-    }
+    let options = crate::mutate::AbsorbOptions {
+        replace,
+        dry_run,
+        allow_long_text,
+    };
+    let report = crate::mutate::absorb(path, &content, &options, None, root.as_deref())?;
+    let accepted = report.written + report.duplicated + report.forgotten;
     outln!(
         "{}",
         serde_json::to_string(&AbsorbOut {
             ok: true,
-            accepted: ops.len(),
-            written,
-            duplicates,
-            forgotten,
+            accepted,
+            written: report.written,
+            duplicates: report.duplicated,
+            forgotten: report.forgotten,
             dry_run,
         })?
     );
@@ -3574,46 +2099,7 @@ fn cmd_similar(path: &Path, id: &str, top: usize, scope: Option<String>) -> Resu
 
 fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
     let source_ids = parse_ids(sources);
-    if source_ids.len() < 2 {
-        bail!("merge requires at least two source ids");
-    }
-    let mut store = Store::open(path)?;
-    let tail = store.tail_view()?;
-    let mut selected = Vec::new();
-    for id in &source_ids {
-        if tail.hidden.contains(id) {
-            bail!("active memory not found: {id}");
-        }
-        let memory = if let Some((_, memory)) = store.find_doc(id)? {
-            memory
-        } else {
-            tail.get(id)
-                .cloned()
-                .ok_or_else(|| anyhow!("active memory not found: {id}"))?
-        };
-        selected.push(memory);
-    }
-    selected.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.text.len().cmp(&a.text.len()))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    if selected
-        .iter()
-        .any(|memory| memory.kind != selected[0].kind || memory.scope != selected[0].scope)
-    {
-        bail!("manual merge requires the same kind and scope");
-    }
-    let merged = build_merged(
-        &selected[0],
-        &source_ids,
-        &text.unwrap_or_else(|| selected[0].text.clone()),
-        "manual",
-        1.0,
-    );
-    append_record(path, 3, &memory_payload(&merged), false)?;
+    let merged = crate::mutate::merge(path, &source_ids, text.as_deref(), None)?;
     outln!(
         "{}",
         json!({"ok": true, "id": merged.id, "sources": source_ids})
@@ -3621,26 +2107,8 @@ fn cmd_merge(path: &Path, sources: &str, text: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn active_memory_exists(store: &mut Store, id: &str) -> Result<bool> {
-    let tail = store.tail_view()?;
-    Ok(!tail.hidden.contains(id) && (store.find_doc(id)?.is_some() || tail.get(id).is_some()))
-}
-
-fn append_tombstone(path: &Path, id: &str, reason: &str) -> Result<()> {
-    let mut payload = Vec::new();
-    put_text(&mut payload, 1, id);
-    put_text(&mut payload, 2, reason);
-    put_u64(&mut payload, 3, crate::model::now_ms());
-    append_record(path, 4, &payload, false)?;
-    Ok(())
-}
-
 pub(crate) fn cmd_forget(path: &Path, id: &str) -> Result<()> {
-    let mut store = Store::open(path)?;
-    if !active_memory_exists(&mut store, id)? {
-        bail!("active memory not found: {id}");
-    }
-    append_tombstone(path, id, "user_request")?;
+    crate::mutate::forget(path, id, "user_request", None)?;
     outln!("{}", json!({"ok": true, "target": id}));
     Ok(())
 }
@@ -3668,14 +2136,6 @@ fn cmd_conflicts(path: &Path) -> Result<()> {
 /// Active memories in the canonical verify accounting: index docs flagged
 /// active in the bitset minus tail-hidden ids, plus active tail memories.
 /// Decodes each active doc once; never scans inactive docs.
-fn active_memories(store: &mut Store) -> Result<Vec<crate::model::Memory>> {
-    let tail = store.tail_view()?;
-    let mut memories = store.active_memories_bulk()?;
-    memories.retain(|memory| !tail.hidden.contains(&memory.id));
-    memories.extend(tail.memories);
-    Ok(memories)
-}
-
 fn conflict_groups(memories: &[crate::model::Memory]) -> Vec<ConflictGroupOut> {
     let mut groups: HashMap<(String, String, String), Vec<&crate::model::Memory>> = HashMap::new();
     for memory in memories {
@@ -3996,75 +2456,6 @@ fn run_consolidate(
     })
 }
 
-fn validate_trust(trust: &str) -> Result<()> {
-    if matches!(trust, "authored" | "verified" | "imported" | "inferred") {
-        Ok(())
-    } else {
-        bail!("invalid trust {trust:?}; expected authored/verified/imported/inferred")
-    }
-}
-
-pub(crate) fn memory_from_input(input: &AppendInput) -> Result<crate::model::Memory> {
-    validate_input(input)?;
-    let trust = input.trust.as_deref().unwrap_or("authored");
-    validate_trust(trust)?;
-    let mut memory = new_memory(
-        &input.kind,
-        &input.scope,
-        &input.subject,
-        &input.text,
-        &input.source,
-        input.confidence.clamp(0.0, 1.0),
-        Vec::new(),
-        None,
-        None,
-    );
-    memory.valid_from = if input.valid_from == 0 {
-        crate::model::now_ms()
-    } else {
-        input.valid_from
-    };
-    memory.valid_to = input.valid_to;
-    memory.supersedes = input.supersedes.clone();
-    memory.conflict_of = input.conflict_of.clone();
-    memory.trust = trust.to_string();
-    memory.source_commit = input.source_commit.clone();
-    if let Some((line, hash)) = source_anchor(&input.source) {
-        memory.source_hash = Some(hash);
-        memory.source_line = (line > 0).then_some(line);
-    }
-    Ok(memory)
-}
-
-fn validate_memory(kind: &str, scope: &str, subject: &str, text: &str) -> Result<()> {
-    if subject.trim().is_empty() || text.trim().is_empty() {
-        bail!("subject and text must not be empty");
-    }
-    if scope.trim().is_empty() {
-        bail!("scope must not be empty");
-    }
-    if !KINDS.contains(&kind) {
-        bail!("invalid kind {:?}", kind);
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_input(input: &AppendInput) -> Result<()> {
-    validate_memory(&input.kind, &input.scope, &input.subject, &input.text)
-}
-
-fn put_text(out: &mut Vec<u8>, id: u8, value: &str) {
-    out.push(id);
-    out.push(1);
-    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-}
-fn put_u64(out: &mut Vec<u8>, id: u8, value: u64) {
-    out.push(id);
-    out.push(2);
-    out.extend_from_slice(&8u32.to_le_bytes());
-    out.extend_from_slice(&value.to_le_bytes());
-}
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|arg| arg == flag)
