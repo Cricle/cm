@@ -38,7 +38,7 @@ require the CLI code:
 
 ```toml
 [dependencies]
-cm-memory = { version = "0.0.2", default-features = false }
+cm-memory = { version = "0.2.0", default-features = false }
 ```
 
 ```rust

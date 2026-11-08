@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.2 - 2026-11-08
+## 0.2.0 - 2026-11-08
 
 - Single-file `cm` store with append-only records, 64 KiB compressed index
   pages, mmap page table, XXH3 checksums, tombstones, and atomic purge/reindex.
