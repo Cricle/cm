@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::model::{kind_id, memory_from_input, memory_payload, AppendInput};
-#[cfg(feature = "cli")]
 use crate::source::source_parts;
 use crate::store::{append_record, Store};
 
@@ -41,7 +40,6 @@ pub(crate) fn frame_subject(task: &str) -> String {
     format!("frame:{task}")
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn append_values(target: &mut Vec<String>, values: Vec<String>) {
     for value in values {
         if !value.trim().is_empty() && !target.contains(&value) {
@@ -107,18 +105,30 @@ pub(crate) fn latest_frame(
         .filter_map(|memory| parse_frame(&memory).map(|frame| (memory, frame)))
         .collect();
     if let Some(task) = task.filter(|task| *task != "current") {
-        return Ok(frames
-            .into_iter()
-            .find(|(memory, _)| memory.subject == frame_subject(task)));
+        // An explicitly named frame is still never injected once completed:
+        // `brief --task x` should not resurrect a finished task as context.
+        return Ok(frames.into_iter().find(|(memory, frame)| {
+            memory.subject == frame_subject(task) && frame.status != "done"
+        }));
     }
-    let index = frames
-        .iter()
-        .position(|(_, frame)| frame.status == "active")
-        .or_else(|| frames.iter().position(|(_, frame)| frame.status != "done"))
-        .unwrap_or(0);
     if frames.is_empty() {
         return Ok(None);
     }
+    let Some(index) = frames
+        .iter()
+        .position(|(_, frame)| frame.status == "active")
+        .or_else(|| {
+            // Paused tasks are not "current" either; only active or other
+            // non-terminal states qualify.
+            frames
+                .iter()
+                .position(|(_, frame)| frame.status != "done" && frame.status != "paused")
+        })
+    else {
+        // Every frame is done/paused: do not resurrect a completed task as
+        // the implicit "current" frame for brief/auto-recall.
+        return Ok(None);
+    };
     Ok(Some(frames.swap_remove(index)))
 }
 
@@ -161,7 +171,6 @@ pub(crate) fn frame_json(memory: &crate::model::Memory, frame: &TaskFrame) -> se
     })
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn path_key(path: &str) -> String {
     let trimmed = path.trim();
     let without_dot = trimmed
@@ -171,7 +180,6 @@ pub(crate) fn path_key(path: &str) -> String {
     without_dot.replace('\\', "/").to_lowercase()
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn source_covers_path(source: &str, touch: &str) -> bool {
     let Some((relative, _)) = source_parts(source) else {
         return false;
@@ -186,7 +194,6 @@ pub(crate) fn source_covers_path(source: &str, touch: &str) -> bool {
         || source_key.starts_with(&format!("{touch_key}/"))
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn uncovered_touches(
     frame: &TaskFrame,
     memories: &[crate::model::Memory],

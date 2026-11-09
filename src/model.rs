@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-#[cfg(feature = "cli")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,33 +6,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_128;
-#[cfg(feature = "cli")]
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::source::{source_anchor, source_anchor_at};
 
-#[derive(Deserialize)]
-pub(crate) struct AppendInput {
-    pub(crate) kind: String,
-    pub(crate) scope: String,
-    pub(crate) subject: String,
-    pub(crate) text: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppendInput {
+    pub kind: String,
+    pub scope: String,
+    pub subject: String,
+    pub text: String,
     #[serde(default)]
-    pub(crate) source: String,
+    pub source: String,
     #[serde(default = "default_confidence")]
-    pub(crate) confidence: f64,
+    pub confidence: f64,
     #[serde(default)]
-    pub(crate) valid_from: u64,
+    pub valid_from: u64,
     #[serde(default)]
-    pub(crate) valid_to: Option<u64>,
+    pub valid_to: Option<u64>,
     #[serde(default)]
-    pub(crate) supersedes: Vec<String>,
+    pub supersedes: Vec<String>,
     #[serde(default)]
-    pub(crate) conflict_of: Option<String>,
+    pub conflict_of: Option<String>,
     #[serde(default)]
-    pub(crate) trust: Option<String>,
+    pub trust: Option<String>,
     #[serde(default)]
-    pub(crate) source_commit: Option<String>,
+    pub source_commit: Option<String>,
 }
 
 pub(crate) fn default_confidence() -> f64 {
@@ -48,43 +45,43 @@ pub(crate) enum ImportLine {
     Append(AppendInput),
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct MemoryOut {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) scope: String,
-    pub(crate) subject: String,
-    pub(crate) text: String,
-    pub(crate) source: String,
-    pub(crate) confidence: f64,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryOut {
+    pub id: String,
+    pub kind: String,
+    pub scope: String,
+    pub subject: String,
+    pub text: String,
+    pub source: String,
+    pub confidence: f64,
     #[serde(default)]
-    pub(crate) sources: Vec<String>,
+    pub sources: Vec<String>,
     #[serde(default)]
-    pub(crate) merged: bool,
+    pub merged: bool,
     #[serde(default)]
-    pub(crate) created_at: u64,
+    pub created_at: u64,
     #[serde(default)]
-    pub(crate) strategy: Option<String>,
+    pub strategy: Option<String>,
     #[serde(default)]
-    pub(crate) score: Option<f64>,
+    pub score: Option<f64>,
     #[serde(default)]
-    pub(crate) valid_from: u64,
+    pub valid_from: u64,
     #[serde(default)]
-    pub(crate) valid_to: Option<u64>,
+    pub valid_to: Option<u64>,
     #[serde(default)]
-    pub(crate) supersedes: Vec<String>,
+    pub supersedes: Vec<String>,
     #[serde(default)]
-    pub(crate) conflict_of: Option<String>,
+    pub conflict_of: Option<String>,
     #[serde(default)]
-    pub(crate) trust: Option<String>,
+    pub trust: Option<String>,
     #[serde(default)]
-    pub(crate) source_commit: Option<String>,
+    pub source_commit: Option<String>,
     #[serde(default)]
-    pub(crate) source_hash: Option<String>,
+    pub source_hash: Option<String>,
     #[serde(default)]
-    pub(crate) source_line: Option<u32>,
+    pub source_line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) snippet: Option<String>,
+    pub snippet: Option<String>,
 }
 
 impl MemoryOut {
@@ -664,7 +661,13 @@ pub(crate) fn memory_snippet(memory: &Memory, query: &str, max_chars: usize) -> 
             matched = Some(matched.map_or(position, |best| best.min(position)));
         }
     }
-    let byte_start = matched.unwrap_or(0);
+    let mut byte_start = matched.unwrap_or(0);
+    // `to_lowercase` may change byte lengths (e.g. dotted capital I), so a
+    // match offset is not guaranteed to be a char boundary in the original
+    // text. Step back to the nearest boundary instead of panicking.
+    while byte_start > 0 && !memory.text.is_char_boundary(byte_start) {
+        byte_start -= 1;
+    }
     let char_start = memory.text[..byte_start].chars().count();
     let start = char_start.saturating_sub(max_chars / 3);
     let mut snippet: String = memory.text.chars().skip(start).take(max_chars).collect();
@@ -940,10 +943,8 @@ fn split_camel_case(text: &str) -> String {
     out
 }
 
-#[cfg(feature = "cli")]
 pub(crate) const MINHASH_K: usize = 128;
 
-#[cfg(feature = "cli")]
 pub(crate) fn minhash_signature(memory: &Memory) -> Option<Vec<u64>> {
     let tokens: HashSet<String> = tokenize(&format!("{} {}", memory.subject, memory.text))
         .into_iter()
@@ -963,7 +964,6 @@ pub(crate) fn minhash_signature(memory: &Memory) -> Option<Vec<u64>> {
     Some(signature)
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn minhash_similarity(left: &Option<Vec<u64>>, right: &Option<Vec<u64>>) -> f64 {
     let (Some(left), Some(right)) = (left, right) else {
         return 0.0;
@@ -974,7 +974,6 @@ pub(crate) fn minhash_similarity(left: &Option<Vec<u64>>, right: &Option<Vec<u64
     left.iter().zip(right).filter(|(a, b)| a == b).count() as f64 / left.len() as f64
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn pair_similarity(
     left: &Memory,
     right: &Memory,
@@ -996,13 +995,11 @@ pub(crate) fn pair_similarity(
     }
 }
 
-#[cfg(feature = "cli")]
 pub(crate) struct Dsu {
     parent: Vec<usize>,
     rank: Vec<usize>,
 }
 
-#[cfg(feature = "cli")]
 impl Dsu {
     pub(crate) fn new(size: usize) -> Self {
         Self {

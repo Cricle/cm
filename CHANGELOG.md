@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 - 2026-11-08
+
+- `ops` module: the full CLI command set is now callable without the `cli`
+  feature (govern, audit, conflicts, similar, purge, doctor, scan, pack,
+  finish-with-strict/apply, frame-set merge, export/import, checkpoint,
+  reindex, verify).
+- `Cm` facade additions: `remember_with`, `append_json`, `brief_with`, `pack`,
+  `govern`, `audit`, `conflicts`, `similar`, `purge`, `doctor`, `scan`,
+  `finish_with`, `frame_set_with`, `export`, `import_jsonl_text`,
+  `cache_stats`, `verify_report`, `checkpoint_op`, `reindex_op`.
+- Public `AppendInput`/`MemoryOut`, `ops::*Options`/report types, and
+  `SKILL_TEXT` for embedders.
+- `cm` CLI remains a thin wrapper over the same operations; output shapes are
+  unchanged.
+- Hardening: imports enforce `SourcePolicy`, reject `frame`/`feedback` and
+  reserved scopes, cap trust at `imported`, regenerate ids and strip
+  supersede/merge metadata; source anchors/snippets/audit reads are confined to
+  the canonical project root; `remember --replace` supersedes every active
+  duplicate; task-frame selection never resurrects done/paused frames.
+
 ## 0.2.0 - 2026-11-08
 
 - Single-file `cm` store with append-only records, 64 KiB compressed index

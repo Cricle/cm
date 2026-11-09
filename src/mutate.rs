@@ -327,11 +327,15 @@ pub(crate) fn merge(
         };
         selected.push(memory);
     }
+    // Newest record is the canonical text; confidence only breaks ties.
     selected.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.text.len().cmp(&a.text.len()))
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.id.cmp(&b.id))
     });
     if selected
