@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 - 2026-11-10
+
+- Wiki planning now ignores git-tracked paths that no longer exist in the
+  working tree (deleted assets are not planned as targets).
+- Wiki generation prompt includes line-numbered source excerpts and a larger
+  declaration evidence map; print-safe handling of `@` scopes avoids accidental
+  `@file` expansion in agent prompts.
+- Wiki agent/reviewer calls have a configurable long timeout
+  (`CM_WIKI_AGENT_TIMEOUT_SECS`, default 3600s) and stale pages are rewritten
+  from targets rather than pointed at old output.
+- Stricter package/workspace/version wording rules reduce unsupported
+  publication/dependency inferences.
+- Wiki tests cover the updated planning and generation behavior.
+
 ## 0.3.0 - 2026-11-08
 
 - `ops` module: the full CLI command set is now callable without the `cli`

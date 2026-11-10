@@ -123,7 +123,7 @@ fn wiki_plan_prompt_apply_and_stale_detection() {
     assert_eq!(next.0.status, "stale");
     let stale_prompt = wiki::prompt(&out, "overview").expect("stale prompt");
     assert!(stale_prompt.contains("This page is stale"));
-    assert!(stale_prompt.contains("earlier version"));
+    assert!(stale_prompt.contains("current TARGETS"));
 
     fs::remove_dir_all(&root).ok();
 }

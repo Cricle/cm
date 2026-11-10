@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,12 @@ use crate::explore::{scan_repo, DirStat};
 use crate::model::now_ms;
 
 pub const WIKI_DIR: &str = ".cm/wiki";
+
+/// Hard cap for one wiki agent/reviewer process. Wiki generation is expected
+/// to use several LLM calls; an unbounded child would otherwise hang the whole
+/// batch when a provider stalls. Long-form wiki pages are allowed a long
+/// default; `CM_WIKI_AGENT_TIMEOUT_SECS` can override it per run.
+const WIKI_AGENT_TIMEOUT_SECS: u64 = 3600;
 
 const MIN_PAGE_CHARS: usize = 1200;
 const MIN_PAGE_SECTIONS: usize = 3;
@@ -418,11 +425,15 @@ fn is_test_file(path: &str) -> bool {
         || name.ends_with(".spec.jsx")
 }
 
-fn test_targets(scan: &crate::explore::RepoScan, manifests: &[String]) -> Vec<String> {
+fn test_targets(
+    scan: &crate::explore::RepoScan,
+    root: &Path,
+    manifests: &[String],
+) -> Vec<String> {
     let mut files: Vec<String> = scan
         .file_paths
         .iter()
-        .filter(|path| is_test_file(path))
+        .filter(|path| is_test_file(path) && root.join(path).is_file())
         .cloned()
         .collect();
     if files.is_empty() {
@@ -445,7 +456,12 @@ fn module_files(scan: &crate::explore::RepoScan, root: &Path, area: &str) -> Vec
     let mut files: Vec<String> = scan
         .file_paths
         .iter()
-        .filter(|file| file.starts_with(&prefix) && is_wiki_file(file) && !is_test_area(file))
+        .filter(|file| {
+            file.starts_with(&prefix)
+                && is_wiki_file(file)
+                && !is_test_area(file)
+                && root.join(file.as_str()).is_file()
+        })
         .cloned()
         .collect();
     if files.is_empty() {
@@ -700,10 +716,13 @@ fn collect_area_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usi
     }
 }
 
-fn flow_targets(scan: &crate::explore::RepoScan) -> Vec<String> {
+fn flow_targets(scan: &crate::explore::RepoScan, root: &Path) -> Vec<String> {
     let mut targets = Vec::new();
     for path in &scan.file_paths {
-        if path.starts_with("examples/") || path.contains("/examples/") {
+        if path.starts_with("examples/")
+            || path.contains("/examples/")
+            || !root.join(path).is_file()
+        {
             continue;
         }
         let name = path.rsplit('/').next().unwrap_or(path);
@@ -726,7 +745,11 @@ fn flow_targets(scan: &crate::explore::RepoScan) -> Vec<String> {
     targets.extend(
         scan.entrypoints
             .iter()
-            .filter(|path| !path.starts_with("examples/") && !path.contains("/examples/"))
+            .filter(|path| {
+                !path.starts_with("examples/")
+                    && !path.contains("/examples/")
+                    && root.join(path).is_file()
+            })
             .take(4)
             .cloned(),
     );
@@ -797,18 +820,25 @@ pub fn plan_with(root: &Path, out: &Path, max_modules: usize) -> Result<WikiPlan
     ));
 
     let mut architecture_targets: Vec<String> = manifests.iter().take(4).cloned().collect();
-    architecture_targets.extend(scan.entrypoints.iter().take(8).cloned());
+    architecture_targets.extend(
+        scan.entrypoints
+            .iter()
+            .filter(|path| root.join(path).is_file())
+            .take(8)
+            .cloned(),
+    );
     let mut entry_files: Vec<String> = scan
         .file_paths
         .iter()
         .filter(|path| {
-            path.ends_with("/src/index.ts")
-                || path.ends_with("/src/index.tsx")
-                || path.ends_with("/src/main.ts")
-                || path.ends_with("/src/main.rs")
-                || path.ends_with("/src/lib.rs")
-                || path.ends_with("/package.json")
-                || path.ends_with("/Cargo.toml")
+            root.join(path).is_file()
+                && (path.ends_with("/src/index.ts")
+                    || path.ends_with("/src/index.tsx")
+                    || path.ends_with("/src/main.ts")
+                    || path.ends_with("/src/main.rs")
+                    || path.ends_with("/src/lib.rs")
+                    || path.ends_with("/package.json")
+                    || path.ends_with("/Cargo.toml"))
         })
         .cloned()
         .collect();
@@ -858,7 +888,7 @@ pub fn plan_with(root: &Path, out: &Path, max_modules: usize) -> Result<WikiPlan
         ));
     }
 
-    let testing_targets = test_targets(&scan, &manifests);
+    let testing_targets = test_targets(&scan, &root, &manifests);
     if !testing_targets.is_empty() {
         pages.push(page(
             &mut seen,
@@ -870,7 +900,7 @@ pub fn plan_with(root: &Path, out: &Path, max_modules: usize) -> Result<WikiPlan
         ));
     }
 
-    let flow_targets = flow_targets(&scan);
+    let flow_targets = flow_targets(&scan, &root);
     if !flow_targets.is_empty() {
         pages.push(page(
             &mut seen,
@@ -1030,7 +1060,7 @@ fn evidence_map(root: &Path, targets: &[String]) -> String {
     let mut out = String::new();
     let mut total = 0usize;
     for target in targets {
-        if total >= 80 {
+        if total >= 240 {
             break;
         }
         let path = root.join(target);
@@ -1042,7 +1072,7 @@ fn evidence_map(root: &Path, targets: &[String]) -> String {
         };
         let mut count = 0usize;
         for (index, line) in text.lines().enumerate() {
-            if count >= 12 || total >= 80 {
+            if count >= 20 || total >= 240 {
                 break;
             }
             if let Some(name) = symbol_name(line) {
@@ -1050,6 +1080,45 @@ fn evidence_map(root: &Path, targets: &[String]) -> String {
                 count += 1;
                 total += 1;
             }
+        }
+    }
+    out
+}
+
+/// Line-numbered source excerpts so a no-tools agent can write and verify
+/// citations without entering a read-tool loop. Large files are truncated;
+/// the agent can still use the EVIDENCE symbol lines.
+fn source_excerpts(root: &Path, targets: &[String]) -> String {
+    const MAX_TOTAL_CHARS: usize = 60_000;
+    const MAX_PER_FILE_LINES: usize = 140;
+    let mut out = String::new();
+    let mut total = 0usize;
+    for target in targets {
+        if total >= MAX_TOTAL_CHARS {
+            break;
+        }
+        let path = root.join(target);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        out.push_str(&format!("\n--- {target} ---\n"));
+        total += target.len() + 10;
+        for (index, line) in text.lines().enumerate() {
+            if index >= MAX_PER_FILE_LINES || total >= MAX_TOTAL_CHARS {
+                out.push_str("... [truncated]\n");
+                break;
+            }
+            // `pir print` expands `@file` references in its prompt input.
+            // Source excerpts can contain scoped package names such as
+            // `@earendil-works/...`; use a fullwidth at-sign in the prompt so
+            // the model sees the text but the print host does not treat it as
+            // an attachment reference.
+            let row = format!("{}: {}\n", index + 1, line.replace('@', "＠"));
+            total += row.len();
+            out.push_str(&row);
         }
     }
     out
@@ -1096,11 +1165,15 @@ pub fn prompt(out: &Path, page_id: &str) -> Result<String> {
     } else {
         format!("\nEVIDENCE (mechanically extracted; verify before citing):\n{evidence}")
     };
+    let excerpts = source_excerpts(Path::new(&manifest.root), &state.page.targets);
+    let excerpt_note = if excerpts.is_empty() {
+        String::new()
+    } else {
+        format!("\nSOURCE EXCERPTS (line-numbered; cite these exact lines when possible):\n{excerpts}")
+    };
     let stale_note = if state.status == "stale" {
-        format!(
-            "\nThis page is stale. An earlier version exists at `{file}`. Read it for context, but re-verify every claim against the current TARGETS and rewrite the page completely.\n",
-            file = state.file
-        )
+        "\nThis page is stale. Rewrite it from the current TARGETS; do not consult any previous wiki output.\n"
+            .to_string()
     } else {
         String::new()
     };
@@ -1114,10 +1187,12 @@ pub fn prompt(out: &Path, page_id: &str) -> Result<String> {
          ROOT: {root}\n\
          TARGETS: {targets}\n\
          {evidence_note}\
+         {excerpt_note}\
          {stale_note}\
          \n\
          Method:\n\
          - Read every TARGETS entry. Follow a direct import, caller, or test only when it is needed to explain behavior.\n\
+         - EVIDENCE lists mechanically extracted declaration lines. Prefer those exact `path:line` values; if you cite anything else, read the line first and verify its content.\n\
          - Do not scan the whole repository. Do not repeat the target list as a file inventory.\n\
          - Ground every non-obvious claim in an existing path or symbol. Every citation must use a full repository-relative path with at least one `/` (except a root file such as `README.md`), one exact declaration or operation line, and no `start-end` range such as `6-14`. Repeat the full path for every citation; never use bare `:NN` shorthand. If a construct spans lines, cite its declaration line.\n\
          - When a sentence or table row names several exports, cite each export's declaration line separately. A single shared citation is not enough.\n\
@@ -1125,6 +1200,7 @@ pub fn prompt(out: &Path, page_id: &str) -> Result<String> {
          - For every TARGET file, name its primary exported type/function or explicitly state why it is out of scope; do not silently omit a target.\n\
          - Include a Dependencies section for module pages: external packages, internal layers, and any UI/theme coupling that exists.\n\
          - Include automatic compaction, retry, and overflow/recovery paths when the source has them.\n\
+         - For package/workspace/version claims, cite the exact `package.json`/`Cargo.toml` declaration. Workspace membership does not establish publication; package consumption requires a dependency declaration; do not infer either from prose.\n\
          - If the source does not establish something, write \"Not established from the available source\" instead of guessing.\n\
          \n\
          Required shape:\n\
@@ -2567,6 +2643,23 @@ fn run_agent(command: &str, prompt: &str, root: &Path) -> Result<String> {
         .with_context(|| format!("start wiki agent: {command}"))?;
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(prompt.as_bytes())?;
+    }
+    let timeout = std::env::var("CM_WIKI_AGENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(WIKI_AGENT_TIMEOUT_SECS));
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("wiki agent timed out after {}s: {command}", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
