@@ -30,6 +30,7 @@ pub(crate) struct FeedbackStats {
 pub(crate) struct BriefMemory {
     pub(crate) id: String,
     pub(crate) kind: String,
+    pub(crate) trust: String,
     pub(crate) subject: String,
     pub(crate) text: String,
     pub(crate) source: String,
@@ -46,6 +47,7 @@ impl From<&crate::model::Memory> for BriefMemory {
         Self {
             id: memory.id.clone(),
             kind: memory.kind.clone(),
+            trust: memory.trust.clone(),
             subject: memory.subject.clone(),
             text: memory.text.clone(),
             source: memory.source.clone(),
@@ -114,6 +116,8 @@ pub(crate) fn brief_prompt(
         out.push_str(&memory.id);
         out.push_str("] ");
         out.push_str(&memory.kind);
+        out.push_str(" trust=");
+        out.push_str(&memory.trust);
         out.push(' ');
         out.push_str(&memory.subject);
         out.push('\n');

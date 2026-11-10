@@ -15,13 +15,13 @@ use crate::brief::{brief_prompt, collect_feedback_stats, json_tokens, BriefMemor
 use crate::explore_api::{self, ExploreCursor, ExploreOptions, ExplorePlan, MechanicalPlan};
 use crate::frames::{self, TaskFrame};
 use crate::model::{
-    cmx_line, estimate_tokens, memory_from_input, memory_payload, now_ms, validate_input,
+    cmx_line, estimate_tokens, memory_from_input_at, memory_payload, now_ms, validate_input,
     validate_memory, validate_trust, AppendInput, ImportLine, Memory, MemoryOut,
 };
 use crate::mutate::{self, AbsorbOptions, AbsorbReport};
 use crate::search::{
-    select_context, select_context_scored, RecallHit, RecallQuery, RecallResponse, SearchOut,
-    SearchQuery,
+    search_out_with, select_context, select_context_scored, RecallHit, RecallQuery, RecallResponse,
+    SearchOut, SearchQuery,
 };
 use crate::source::source_snippet;
 use crate::store::{
@@ -275,7 +275,7 @@ impl Cm {
             source_commit: input.source_commit,
         };
         validate_input(&append)?;
-        let memory = memory_from_input(&append)?;
+        let memory = memory_from_input_at(&append, Some(&self.options.source_policy.root))?;
         let _lock = acquire_store_lock_with(&self.path, self.options.lock_timeout)?;
         if let Some(existing_id) = find_tail_duplicate(&self.path, &memory)? {
             if let Some(existing) = self.get(&existing_id)? {
@@ -292,16 +292,71 @@ impl Cm {
         })
     }
 
-    /// Return one active memory by id.
+    /// Append one durable memory with the full CLI option set
+    /// (`--force`, `--replace`, `--verify-source`, `--durable`).
+    pub fn remember_with(
+        &self,
+        input: NewMemory,
+        options: &crate::ops::RememberOptions,
+    ) -> Result<RememberResult> {
+        self.ensure_writable()?;
+        self.options.source_policy.check(&input.source)?;
+        let append = AppendInput {
+            kind: input.kind,
+            scope: input.scope,
+            subject: input.subject,
+            text: input.text,
+            source: input.source,
+            confidence: input.confidence,
+            valid_from: input.valid_from,
+            valid_to: input.valid_to,
+            supersedes: input.supersedes,
+            conflict_of: input.conflict_of,
+            trust: input.trust,
+            source_commit: input.source_commit,
+        };
+        let outcome = crate::ops::remember_with_at(
+            &self.path,
+            &append,
+            options,
+            Some(&self.options.source_policy.root),
+        )?;
+        Ok(RememberResult {
+            memory: outcome.memory,
+            duplicate: outcome.duplicate,
+        })
+    }
+
+    /// Append a raw CLI `append --json` record.
+    pub fn append_json(&self, input_json: &str, durable: bool) -> Result<Memory> {
+        self.ensure_writable()?;
+        let input: AppendInput = serde_json::from_str(input_json)
+            .map_err(|error| anyhow!("parse --json input: {error}"))?;
+        self.options.source_policy.check(&input.source)?;
+        crate::ops::append_input_at(
+            &self.path,
+            &input,
+            durable,
+            Some(&self.options.source_policy.root),
+        )
+    }
+
+    /// Return one active, unexpired memory by id.
     pub fn get(&self, id: &str) -> Result<Option<Memory>> {
         let mut store = self.open_store()?;
+        let now = now_ms();
+        let active = |memory: &Memory| memory.valid_to.is_none_or(|end| end > now);
         if let Some((_, memory)) = store.find_doc(id)? {
             let tail = store.tail_view()?;
             if !tail.hidden.contains(id) {
-                return Ok(Some(memory));
+                return Ok(active(&memory).then_some(memory));
             }
         }
-        Ok(store.tail_view()?.get(id).cloned())
+        Ok(store
+            .tail_view()?
+            .get(id)
+            .filter(|memory| active(memory))
+            .cloned())
     }
 
     /// Return all active memories, newest first.
@@ -367,7 +422,7 @@ impl Cm {
 
     /// Search with the CLI's full filter set.
     pub fn search_query(&self, query: &SearchQuery) -> Result<SearchOut> {
-        crate::search::search_out(&self.path, query)
+        search_out_with(&self.path, query, &self.options)
     }
 
     /// Recall a token-budgeted context window.
@@ -502,14 +557,151 @@ impl Cm {
         })
     }
 
+    /// Build a brief with the full CLI option set (`--top`, `--max-items`,
+    /// `--snippets`, `--root`).
+    pub fn brief_with(&self, options: &crate::ops::BriefOptions) -> Result<BriefResponse> {
+        let (frame, query, hits, estimated_tokens) =
+            crate::ops::select_brief_with(&self.path, options, &self.options)?;
+        let memories: Vec<crate::brief::BriefMemory> = hits
+            .iter()
+            .map(|hit| {
+                let mut brief = crate::brief::BriefMemory::from(&hit.memory);
+                brief.snippet = hit.snippet.clone();
+                brief
+            })
+            .collect();
+        let prompt = crate::brief::brief_prompt(&frame, &query, &memories);
+        Ok(BriefResponse {
+            frame: frame.and_then(|value| serde_json::from_value(value).ok()),
+            query,
+            budget: options.budget,
+            estimated_tokens,
+            memories: hits,
+            prompt,
+        })
+    }
+
+    /// Build the `cm pack` prompt.
+    pub fn pack(&self, options: &crate::ops::BriefOptions) -> Result<String> {
+        crate::ops::pack_prompt_with(&self.path, options, &self.options)
+    }
+
+    /// `cm govern`.
+    pub fn govern(&self, options: &crate::ops::GovernOptions) -> Result<serde_json::Value> {
+        if options.apply {
+            self.ensure_writable()?;
+        }
+        crate::ops::govern(&self.path, options)
+    }
+
+    /// `cm audit`.
+    pub fn audit(&self, options: &crate::ops::AuditOptions) -> Result<serde_json::Value> {
+        if options.apply || options.refresh {
+            self.ensure_writable()?;
+        }
+        crate::ops::audit(&self.path, options)
+    }
+
+    /// `cm conflicts`.
+    pub fn conflicts(&self) -> Result<serde_json::Value> {
+        crate::ops::conflicts(&self.path)
+    }
+
+    /// `cm similar`.
+    pub fn similar(&self, id: &str, top: usize, scope: Option<&str>) -> Result<serde_json::Value> {
+        crate::ops::similar(&self.path, id, top, scope)
+    }
+
+    /// `cm purge` (physical compaction).
+    pub fn purge(&self) -> Result<serde_json::Value> {
+        self.ensure_writable()?;
+        crate::ops::purge(&self.path)
+    }
+
+    /// `cm doctor`.
+    pub fn doctor(&self) -> Result<serde_json::Value> {
+        crate::ops::doctor(&self.path)
+    }
+
+    /// `cm scan`.
+    pub fn scan(&self, limit: usize, offset: usize, format: &str) -> Result<serde_json::Value> {
+        crate::ops::scan(&self.path, limit, offset, format)
+    }
+
+    /// `cm finish` with strict/apply audit+govern close-out.
+    pub fn finish_with(&self, options: &crate::ops::FinishOptions) -> Result<serde_json::Value> {
+        self.ensure_writable()?;
+        crate::ops::finish_with(&self.path, options)
+    }
+
+    /// `cm frame set` with merge semantics.
+    pub fn frame_set_with(&self, options: &crate::ops::FrameSetOptions) -> Result<Memory> {
+        self.ensure_writable()?;
+        crate::ops::frame_set(&self.path, options)
+    }
+
+    /// `cm export`.
+    pub fn export(&self, format: crate::ops::ExportFormat, limit: Option<usize>) -> Result<String> {
+        crate::ops::export_text(&self.path, format, limit)
+    }
+
+    /// `cm import` from an in-memory JSONL string.
+    pub fn import_jsonl_text(&self, text: &str) -> Result<ImportReport> {
+        self.ensure_writable()?;
+        let written = crate::ops::import_text_with_policy(
+            &self.path,
+            text,
+            Some(&self.options.source_policy),
+            true,
+        )?;
+        Ok(ImportReport {
+            written,
+            skipped: 0,
+        })
+    }
+
+    /// `cm cache-stats`.
+    pub fn cache_stats(&self) -> Result<serde_json::Value> {
+        crate::ops::cache_stats(&self.path)
+    }
+
+    /// `cm verify` / `cm status`.
+    pub fn verify_report(&self, full: bool) -> Result<serde_json::Value> {
+        crate::ops::verify(&self.path, full)
+    }
+
+    /// `cm checkpoint`.
+    pub fn checkpoint_op(&self, in_place: bool) -> Result<serde_json::Value> {
+        self.ensure_writable()?;
+        crate::ops::checkpoint(&self.path, in_place)
+    }
+
+    /// `cm reindex`.
+    pub fn reindex_op(&self) -> Result<serde_json::Value> {
+        self.ensure_writable()?;
+        crate::ops::reindex(&self.path)
+    }
+
     pub fn status(&self) -> Result<StoreStatus> {
-        let store = self.open_store()?;
+        let mut store = self.open_store()?;
         let tail = store.tail_view()?;
         let cache = store.cache_stats()?;
+        // Tombstoned docs are hidden but still present in the active bitmap;
+        // subtract them so the reported count matches what recall can return.
+        let mut hidden_docs = 0u64;
+        for id in &tail.hidden {
+            if store.find_doc(id)?.is_some() {
+                hidden_docs += 1;
+            }
+        }
+        let active_count = store
+            .active_count()?
+            .saturating_sub(hidden_docs)
+            .saturating_add(tail.memories.len() as u64);
         Ok(StoreStatus {
             path: self.path.clone(),
             doc_count: store.header.doc_count,
-            active_count: store.active_count()? + tail.memories.len() as u64,
+            active_count,
             tail_count: tail.memories.len(),
             generation: store.header.generation,
             bytes: std::fs::metadata(&self.path)?.len(),
@@ -563,6 +755,12 @@ impl Cm {
                     .ok_or_else(|| anyhow!("frame record {} has invalid payload", memory.id))
             })
             .transpose()
+    }
+
+    /// JSON view of all frames (the `frame list` action), honoring this
+    /// handle's `StoreOptions`.
+    pub fn frame_list_value(&self) -> Result<serde_json::Value> {
+        crate::ops::frame_list_value_with(&self.path, &self.options)
     }
 
     pub fn frames(&self) -> Result<Vec<TaskFrame>> {
@@ -675,7 +873,7 @@ impl Cm {
             trust: Some("authored".to_string()),
             source_commit: None,
         };
-        let summary_memory = memory_from_input(&input)?;
+        let summary_memory = memory_from_input_at(&input, Some(&self.options.source_policy.root))?;
         append_record_unlocked(&self.path, T_MEMORY, &memory_payload(&summary_memory), true)?;
         Ok(FinishResult {
             frame,
@@ -763,8 +961,20 @@ impl Cm {
                     }
                     full.into_memory()
                 }
-                ImportLine::Append(input) => memory_from_input(&input)?,
+                ImportLine::Append(input) => {
+                    validate_input(&input)?;
+                    memory_from_input_at(&input, Some(&self.options.source_policy.root))?
+                }
             };
+            // Embedded imports are untrusted data: apply the source policy,
+            // cap trust at `imported`, regenerate ids and strip
+            // merge/supersede metadata so they cannot forge verified facts or
+            // hide existing records.
+            let memory = crate::ops::sanitize_imported_memory(
+                memory,
+                Some(&self.options.source_policy),
+                true,
+            )?;
             let record_type = if memory.merged { T_MERGE } else { T_MEMORY };
             append_record_unlocked(&self.path, record_type, &memory_payload(&memory), true)?;
             written += 1;

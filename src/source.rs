@@ -188,12 +188,58 @@ pub(crate) fn source_anchor(source: &str) -> Option<(u32, String)> {
     bases.iter().find_map(|base| source_anchor_at(source, base))
 }
 
+/// Resolve a repository-relative source path under `root`.
+///
+/// Rejects absolute paths, `..`, and empty paths, then resolves symlinks with
+/// `canonicalize` and verifies the result still lives under the canonical
+/// root. This is the single join used by anchors, snippets and audit reads, so
+/// an imported record cannot point the reader outside the project.
+pub(crate) fn confined_source_path(root: &Path, relative: &Path) -> Option<PathBuf> {
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    let mut clean = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => clean.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return None;
+    }
+    let candidate = root.join(&clean);
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canonical_candidate = fs::canonicalize(&candidate).ok()?;
+    path_within(&canonical_candidate, &canonical_root).then_some(canonical_candidate)
+}
+
+fn path_within(candidate: &Path, root: &Path) -> bool {
+    if cfg!(windows) {
+        let candidate = candidate
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let root = root
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        candidate == root || candidate.starts_with(&(root + "\\"))
+    } else {
+        candidate == root || candidate.starts_with(root)
+    }
+}
+
 /// Anchor a source against an explicit project root. A directory anchor is
 /// valid for mechanically generated area records; audit treats directories as
 /// structural, not content, citations.
 pub(crate) fn source_anchor_at(source: &str, root: &Path) -> Option<(u32, String)> {
     let (relative, symbol) = source_parts(source)?;
-    let path = root.join(&relative);
+    let path = confined_source_path(root, &relative)?;
     if path.is_dir() {
         return Some((
             0,
@@ -207,9 +253,10 @@ pub(crate) fn source_anchor_at(source: &str, root: &Path) -> Option<(u32, String
 pub(crate) fn source_snippet(memory: &Memory, root: &Path, lines: usize) -> Option<String> {
     let (relative, _) = source_parts(&memory.source)?;
     let line = memory.source_line? as usize;
-    let text = fs::read_to_string(root.join(relative)).ok()?;
+    let path = confined_source_path(root, &relative)?;
+    let text = fs::read_to_string(path).ok()?;
     let all: Vec<&str> = text.lines().collect();
-    if all.is_empty() {
+    if all.is_empty() || line > all.len() {
         return None;
     }
     let start = line.saturating_sub(1);

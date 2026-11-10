@@ -799,6 +799,21 @@ impl Store {
     }
 
     pub(crate) fn open_with(path: &Path, options: &StoreOptions) -> Result<Self> {
+        // An in-place checkpoint can replace the header between our mmap and
+        // header read, leaving offsets that point past the mapped length. A
+        // single retry re-maps the file at its new length; a genuinely corrupt
+        // store still fails on the second attempt.
+        match Self::open_with_once(path, options) {
+            Ok(store) => Ok(store),
+            Err(first) => Self::open_with_once(path, options).map_err(|second| {
+                second.context(format!(
+                    "after retrying a concurrent checkpoint ({first:#})"
+                ))
+            }),
+        }
+    }
+
+    fn open_with_once(path: &Path, options: &StoreOptions) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mmap = Arc::new(unsafe { Mmap::map(&file)? });
         let header = read_current_header(&mmap[..])?;
@@ -1187,36 +1202,40 @@ impl Store {
         if self.doc_count() <= 10_000 {
             return self.bm25_all_terms(&terms, scope_id, kind, exclude, hidden_docs, limit);
         }
-        term_info.sort_by_key(|(_, count, _, _)| *count);
-        let (anchor_start, anchor_count, anchor_end, _) = term_info[0];
+        // Large stores: score the UNION of every query term's postings. The
+        // old fast path only scored docs containing the rarest term, so a doc
+        // matching the other terms was invisible above 10k docs. Candidate
+        // selection is bounded by summed term frequency, not doc index, so a
+        // truncation cannot silently drop the best matches.
         let max_candidates = 50_000usize;
         let active = self.active_bits()?;
-        let anchor_postings = self.decode_postings(anchor_start, anchor_count, anchor_end)?;
-        let mut extra_maps: Vec<Option<HashMap<u32, u32>>> = Vec::with_capacity(term_info.len());
-        for (index, (start, count, end, _)) in term_info.iter().enumerate() {
-            if index == 0 {
-                extra_maps.push(None);
-            } else {
-                extra_maps.push(Some(
-                    self.decode_postings(*start, *count, *end)?
-                        .into_iter()
-                        .collect::<HashMap<_, _>>(),
-                ));
+        let mut postings_maps: Vec<HashMap<u32, u32>> = Vec::with_capacity(term_info.len());
+        for (start, count, end, _) in &term_info {
+            postings_maps.push(
+                self.decode_postings(*start, *count, *end)?
+                    .into_iter()
+                    .collect::<HashMap<_, _>>(),
+            );
+        }
+        let mut candidate_weight: HashMap<u32, u64> = HashMap::new();
+        for map in &postings_maps {
+            for (doc_idx, tf) in map {
+                if exclude == Some(*doc_idx)
+                    || hidden_docs.is_some_and(|hidden| hidden.contains(doc_idx))
+                    || active[*doc_idx as usize / 8] & (1 << (*doc_idx % 8)) == 0
+                {
+                    continue;
+                }
+                *candidate_weight.entry(*doc_idx).or_insert(0) += u64::from(*tf);
             }
         }
-        let candidates: Vec<(u32, u32)> = anchor_postings
-            .into_iter()
-            .take(max_candidates)
-            .filter(|(doc_idx, _)| {
-                exclude != Some(*doc_idx)
-                    && !hidden_docs.is_some_and(|hidden| hidden.contains(doc_idx))
-                    && active[*doc_idx as usize / 8] & (1 << (*doc_idx % 8)) != 0
-            })
-            .collect();
+        let mut candidates: Vec<(u32, u64)> = candidate_weight.into_iter().collect();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.truncate(max_candidates);
         let candidate_docs: Vec<u32> = candidates.iter().map(|(doc_idx, _)| *doc_idx).collect();
         let metas = self.index().doc_meta_batch(&candidate_docs)?;
         let mut results = Vec::new();
-        for ((doc_idx, anchor_tf), meta) in candidates.into_iter().zip(metas) {
+        for ((doc_idx, _), meta) in candidates.into_iter().zip(metas) {
             if scope_id.is_some_and(|value| meta.scope_id != value)
                 || kind.is_some_and(|value| meta.kind != value)
             {
@@ -1226,13 +1245,9 @@ impl Store {
             let norm = 1.2 * (1.0 - 0.75 + 0.75 * token_count / avgdl.max(1.0));
             let mut score = 0.0;
             for (index, (_, _, _, idf)) in term_info.iter().enumerate() {
-                let tf = if index == 0 {
-                    anchor_tf as f64
-                } else {
-                    match extra_maps[index].as_ref().and_then(|map| map.get(&doc_idx)) {
-                        Some(tf) => *tf as f64,
-                        None => continue,
-                    }
+                let tf = match postings_maps[index].get(&doc_idx) {
+                    Some(tf) => f64::from(*tf),
+                    None => continue,
                 };
                 score += idf * (tf * 2.2) / (tf + norm);
             }
@@ -1275,7 +1290,6 @@ impl Store {
         })
     }
 
-    #[cfg(feature = "cli")]
     pub(crate) fn scan_page(&mut self, limit: usize, offset: usize) -> Result<Vec<Memory>> {
         let tail = self.tail_view()?;
         let mut skipped = offset;
@@ -1499,40 +1513,60 @@ pub(crate) fn find_tail_duplicate(path: &Path, target: &Memory) -> Result<Option
     Ok(None)
 }
 
+/// Every active record for a scope+kind+subject, newest first.
+///
+/// `remember --replace` supersedes all of them; returning only the newest
+/// would leave older duplicates visible after a store passes the small-index
+/// cutoff or already contains duplicates from an earlier import.
+pub(crate) fn find_subject_memories(
+    path: &Path,
+    scope: &str,
+    kind: &str,
+    subject: &str,
+) -> Result<Vec<Memory>> {
+    use std::collections::HashMap;
+
+    let mut matches: HashMap<String, Memory> = HashMap::new();
+    let mut consider = |memory: Memory| {
+        if memory.scope == scope && memory.kind == kind && memory.subject == subject {
+            matches.entry(memory.id.clone()).or_insert(memory);
+        }
+    };
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let header = read_current_header(&mmap)?;
+    if header.tail_start as usize <= mmap.len() {
+        let records = read_records_from(&mmap, header.tail_start as usize)?;
+        for doc in active_docs(&records)? {
+            consider(doc.memory);
+        }
+    }
+    let mut store = Store::open(path)?;
+    let tail = store.tail_view()?;
+    for idx in 0..store.doc_count() {
+        if !store.is_active(idx)? {
+            continue;
+        }
+        let meta = store.doc_meta(idx)?;
+        let memory = store.doc_memory(&meta)?;
+        if !tail.hidden.contains(&memory.id) {
+            consider(memory);
+        }
+    }
+    let mut out: Vec<Memory> = matches.into_values().collect();
+    out.sort_by(|a, b| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
+    Ok(out)
+}
+
 pub(crate) fn find_subject_memory(
     path: &Path,
     scope: &str,
     kind: &str,
     subject: &str,
 ) -> Result<Option<Memory>> {
-    let file = File::open(path)?;
-    let mmap = unsafe { Mmap::map(&file)? };
-    let header = read_current_header(&mmap)?;
-    let records = read_records_from(&mmap, header.tail_start as usize)?;
-    for doc in active_docs(&records)? {
-        if doc.memory.scope == scope && doc.memory.kind == kind && doc.memory.subject == subject {
-            return Ok(Some(doc.memory));
-        }
-    }
-    if header.doc_count > 0 && header.doc_count <= 10_000 {
-        let mut store = Store::open(path)?;
-        let tail = store.tail_view()?;
-        for idx in 0..store.doc_count() {
-            if !store.is_active(idx)? {
-                continue;
-            }
-            let meta = store.doc_meta(idx)?;
-            let memory = store.doc_memory(&meta)?;
-            if !tail.hidden.contains(&memory.id)
-                && memory.scope == scope
-                && memory.kind == kind
-                && memory.subject == subject
-            {
-                return Ok(Some(memory));
-            }
-        }
-    }
-    Ok(None)
+    Ok(find_subject_memories(path, scope, kind, subject)?
+        .into_iter()
+        .next())
 }
 
 #[cfg(feature = "cli")]

@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::brief::FEEDBACK_KIND;
 use crate::frames::FRAME_KIND;
 use crate::model::{cmx_line, estimate_tokens, kind_id, memory_snippet, preview, Memory};
-use crate::store::Store;
+use crate::store::{Store, StoreOptions};
 
 #[derive(Clone, Debug)]
 pub struct SearchQuery {
@@ -100,7 +100,16 @@ pub struct SearchOut {
     pub candidates: Vec<SearchHit>,
 }
 
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
 pub(crate) fn search_out(path: &Path, q: &SearchQuery) -> Result<SearchOut> {
+    search_out_with(path, q, &StoreOptions::default())
+}
+
+pub(crate) fn search_out_with(
+    path: &Path,
+    q: &SearchQuery,
+    options: &StoreOptions,
+) -> Result<SearchOut> {
     let SearchQuery {
         query,
         top,
@@ -114,7 +123,7 @@ pub(crate) fn search_out(path: &Path, q: &SearchQuery) -> Result<SearchOut> {
     let top = *top;
     let min_score = *min_score;
     let include_expired = *include_expired;
-    let mut store = Store::open(path)?;
+    let mut store = Store::open_with(path, options)?;
     store.set_cache_affinity(scope.as_deref(), task.as_deref());
     let tail = store.tail_view()?;
     let scope_id = match scope.as_deref() {
@@ -268,16 +277,21 @@ pub(crate) fn select_context_scored(
     let allow_meta = kind
         .as_deref()
         .is_some_and(|kind| kind == FRAME_KIND || kind == FEEDBACK_KIND);
+    // Exclude hidden/superseded docs BEFORE the ranked fetch: filtering them
+    // afterwards lets a superseded high scorer consume a top-N slot and can
+    // leave fewer live results than requested.
+    let mut hidden_docs = HashSet::new();
+    for id in &tail.hidden {
+        if let Some((doc_idx, _)) = store.find_doc(id)? {
+            hidden_docs.insert(doc_idx);
+        }
+    }
+    let fetch = top.saturating_mul(8).min(512);
     let mut hits: HashMap<String, (f64, crate::model::Memory)> = HashMap::new();
     if scope.is_none() || scope_id.is_some() {
-        for (doc_idx, score) in store.bm25(
-            query,
-            scope_id,
-            kind_id,
-            None,
-            None,
-            top.saturating_mul(4).min(256),
-        )? {
+        for (doc_idx, score) in
+            store.bm25(query, scope_id, kind_id, None, Some(&hidden_docs), fetch)?
+        {
             let meta = store.doc_meta(doc_idx)?;
             let memory = store.doc_memory(&meta)?;
             if tail.hidden.contains(&memory.id) {
@@ -286,13 +300,7 @@ pub(crate) fn select_context_scored(
             hits.insert(memory.id.clone(), (score, memory));
         }
     }
-    for (score, memory) in tail.bm25(
-        query,
-        scope.as_deref(),
-        kind.as_deref(),
-        None,
-        top.saturating_mul(4).min(256),
-    ) {
+    for (score, memory) in tail.bm25(query, scope.as_deref(), kind.as_deref(), None, fetch) {
         hits.insert(memory.id.clone(), (score, memory));
     }
     let mut candidates: Vec<(f64, crate::model::Memory)> = hits

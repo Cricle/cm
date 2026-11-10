@@ -38,7 +38,7 @@ require the CLI code:
 
 ```toml
 [dependencies]
-cm-memory = { version = "0.2.0", default-features = false }
+cm-memory = { version = "0.3.1", default-features = false }
 ```
 
 ```rust
@@ -62,14 +62,21 @@ let all = cm.all()?;
 
 The embedding surface covers the full lifecycle:
 
-- memory: `remember`, `get`, `all`, `search`, `search_query`, `recall`
-- task context: `brief`, `brief_for`, `brief_with_query`, `frame_set`,
-  `frame_get`, `frames`, `claim`, `release`, `finish`
-- governance: `forget`, `merge`, `feedback`, `absorb`
+- memory: `remember`, `remember_with`, `append_json`, `get`, `all`, `search`,
+  `search_query`, `recall`, `scan`
+- task context: `brief`, `brief_with`, `brief_for`, `brief_with_query`,
+  `pack`, `frame_set`, `frame_set_with`, `frame_get`, `frames`, `claim`,
+  `release`, `finish`, `finish_with`
+- governance: `forget`, `merge`, `feedback`, `conflicts`, `similar`, `govern`,
+  `audit`, `absorb`
 - exploration: `explore_plan`, `mechanical_explore`, `explore_cursor`,
   `set_explore_cursor`, `explore_cursor_for`
-- maintenance: `status`, `checkpoint`, `reindex`, `verify`, `export_jsonl`,
-  `import_jsonl`
+- maintenance: `status`, `cache_stats`, `checkpoint_op`, `reindex_op`,
+  `verify_report`, `doctor`, `purge`, `export`, `import_jsonl_text`
+
+The `ops` module also exposes the CLI-parity report types (`GovernOptions`,
+`AuditOptions`, `FinishOptions`, `BriefOptions`, `ExportFormat`, ...), so an
+embedder can run the same operations the `cm` binary does without a process.
 
 `Cm::open_with(StoreOptions { .. })` supports read-only stores, a bounded lock
 timeout, an in-memory or disk cache, and a strict source policy that rejects

@@ -26,6 +26,8 @@ mod install;
 mod model;
 #[path = "../src/mutate.rs"]
 mod mutate;
+#[path = "../src/ops.rs"]
+mod ops;
 #[path = "../src/search.rs"]
 mod search;
 #[path = "../src/source.rs"]
